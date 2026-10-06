@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Render submission.md -> submission.pdf via python-markdown + headless Chrome (Windows side of WSL).
+# Render submission.md -> submission.pdf (headless Chrome) and submission.docx (Word, for Google Docs import).
 set -euo pipefail
 cd "$(dirname "$0")"
 CHROME="/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
@@ -32,3 +32,8 @@ cp submission.html "$WINTMP/cb_submission.html"
 cp "$WINTMP/cb_submission.pdf" submission.pdf
 chmod 644 submission.pdf
 echo "wrote submission.pdf ($(stat -c %s submission.pdf) bytes)"
+
+
+# submission.docx for Google Docs import (stdlib OOXML writer; Word automation is blocked on this machine).
+python3 md_to_docx.py submission.md submission.docx
+chmod 644 submission.docx

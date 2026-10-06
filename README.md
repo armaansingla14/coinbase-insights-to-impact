@@ -1,18 +1,20 @@
 # Coinbase SEA "Insights to Impact": supporting code and tests
 
-The written answers are in `submission.md` (rendered to `submission.pdf`). This repo holds the full, runnable
+The written answers are in `submission.md` (exported to `submission.docx` for the Google Doc, and `submission.pdf`). This repo holds the full, runnable
 versions of the abridged code in that document, plus the tests behind every number it quotes.
 All data is synthetic. All code and tests run on Python 3.9+ **standard library only** (sqlite3, csv, unittest,
-zoneinfo); there is nothing to install. Only `build_pdf.sh` (optional, regenerates the PDF) needs the python-markdown
-package and Chrome.
+zoneinfo); there is nothing to install. Only `build_docs.sh` (optional, regenerates the .docx and PDF) needs the
+python-markdown package, plus Chrome for the PDF.
 
 ## Layout
 
 ```
-submission.md / submission.pdf      the answers (<= 1,500 words excluding code blocks)
+submission.md                       the answers (<= 1,500 words excluding code blocks)
+submission.docx / submission.pdf    the same answers, for Google Docs import and as a PDF
 run_all_tests.sh                    runs every suite below; exits non-zero on any failure
 wordcount.py                        prose word counter (excludes fenced code blocks)
-build_pdf.sh                        submission.md -> submission.pdf (python-markdown + headless Chrome under WSL)
+build_docs.sh                       submission.md -> submission.docx (md_to_docx.py) and submission.pdf (headless Chrome)
+md_to_docx.py                       markdown -> .docx writer (stdlib OOXML; native lists, tables, monospace code)
 
 ex1/  Exercise 1: onboarding funnel data model
   fct_onboarding_funnel.sql         full Snowflake model: stg_onboarding_events -> int_identity_map ->

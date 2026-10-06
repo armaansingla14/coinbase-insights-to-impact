@@ -1,6 +1,6 @@
 # Coinbase SEA: Insights to Impact Challenge
 
-**Assumptions:** fictional data, UTC timestamps, Snowflake SQL. Code is abridged; full code and tests (`./run_all_tests.sh`) are at [github.com/armaansingla14/coinbase-insights-to-impact](https://github.com/armaansingla14/coinbase-insights-to-impact).
+**Assumptions:** fictional data, UTC timestamps, Snowflake SQL. Code is abridged and excluded from the word count; full code and tests are at [github.com/armaansingla14/coinbase-insights-to-impact](https://github.com/armaansingla14/coinbase-insights-to-impact).
 
 ---
 
@@ -45,12 +45,13 @@ SELECT COALESCE(p.user_uuid, a.user_uuid)                          AS user_uuid,
   COALESCE(p.signup_at, a.created_at)                              AS signup_at,
   p.signup_at IS NULL                                              AS signup_event_missing,
   (p.first_deposit_at IS NOT NULL OR p.first_trade_at IS NOT NULL) AS reached_first_deposit,
-  (p.first_deposit_at IS NULL AND p.first_trade_at IS NOT NULL)    AS has_missing_step,  -- one clause per step
-  COALESCE(p.is_out_of_order, FALSE)                               AS is_out_of_order    -- vs ANY earlier step
+  -- has_missing_step: one clause per step; is_out_of_order: vs ANY earlier step
+  (p.first_deposit_at IS NULL AND p.first_trade_at IS NOT NULL)    AS has_missing_step,
+  COALESCE(p.is_out_of_order, FALSE)                               AS is_out_of_order
   -- pivoted = MIN(IFF(step=...)) per user; accounts = LOWER(TRIM(user_uuid)), 1 row/user
-  -- ...full model: ex1/fct_onboarding_funnel.sql; SQLite port + 31 unit tests: ex1/sqlite, ex1/tests
+  -- full model: ex1/fct_onboarding_funnel.sql; SQLite port + 31 tests: ex1/sqlite, ex1/tests
 FROM pivoted p
-FULL OUTER JOIN accounts a ON a.user_uuid = p.user_uuid;  -- accounts spine: users with zero events still count
+FULL OUTER JOIN accounts a ON a.user_uuid = p.user_uuid;  -- spine: zero-event users still count
 ```
 
 **Data quality checks** (*error* blocks the build and pages the owner; *warn* flags trends)
@@ -75,7 +76,8 @@ PT = ZoneInfo("America/Los_Angeles")  # handles PST/PDT switches
 PARSERS = {
     "iso": parse_iso,
     "epoch_ms": lambda v: datetime.fromtimestamp(float(v) / 1000, tz=UTC),
-    "naive_pt": lambda v: datetime.strptime(v, "%Y-%m-%d %H:%M:%S").replace(tzinfo=PT).astimezone(UTC),
+    "naive_pt": lambda v: (datetime.strptime(v, "%Y-%m-%d %H:%M:%S")
+                           .replace(tzinfo=PT).astimezone(UTC)),
 }
 
 def load(path, id_col, ts_col, ts_fmt):
@@ -109,6 +111,8 @@ differing = Counter(col for rs in dups.values() for col in rs[0]
                     if col not in ("uid", "ts_utc") and len({r[col] for r in rs}) > 1)
 membership = Counter("".join(s for s in "ABC" if u in ids[s]) for u in set().union(*ids.values()))
 ```
+
+**Output** on the synthetic CSVs (abridged):
 
 ```text
 == 1. Duplicate user_ids, starting with System C (keep earliest row per user) ==
@@ -149,7 +153,9 @@ Accounts created, UTC day, excl. test/internal, deduped: 50,000
 **What I'd send the PM (same day)**
 > "Use **50,000 new accounts** (created on 9/24 UTC, excluding internal/test accounts). The systems aren't disagreeing about facts; they count different things: C double-counts replayed batches, B uses Pacific time and only counts email-verified users (43.3K of the 50K are verified), and A includes test accounts. I've reconciled all three with zero unexplained users. Suggested footnote: *'Sign-ups = accounts created, UTC day, excl. internal.'* Risk: the test-account filter uses email domains, so the number could move by around ±1% once confirmed with Eng. I'll have that by Thursday."
 
-If earlier decks used B, I'd restate last week on the new basis so the change doesn't read as ~11% growth. **What I flag:** C's replayed batches (owner ticket, uniqueness test), B's misleading name (verified, Pacific day), A's test accounts.
+If earlier decks used B, I'd restate last week on the new basis so the change doesn't read as ~11% growth.
+
+**What I flag:** C's replayed batches (owner ticket, uniqueness test), B's misleading name (verified, Pacific day), A's test accounts.
 
 ---
 
@@ -184,17 +190,19 @@ Verified on a 7-user SQLite fixture: legacy reports 11 completed trades against 
 -- v2 sketch: dedupe to user-week before counting; statuses from a lookup, not literals
 WITH trades_wk AS (                                    -- 1 row per user-week (tested)
   SELECT t.user_id,
-         DATE_TRUNC('week', CONVERT_TIMEZONE('UTC', t.created_at)) AS week,  -- created_at TIMESTAMP_TZ; WEEK_START=1 (Mon)
+         -- created_at converted to UTC; WEEK_START = 1 (Monday)
+         DATE_TRUNC('week', CONVERT_TIMEZONE('UTC', t.created_at)) AS week,
          COUNT_IF(s.is_completed)                                  AS completed_trades
   FROM trades t
   LEFT JOIN dim_trade_status s ON s.status_id = t.status   -- unmapped status => DQ test fails
   GROUP BY 1, 2
-  HAVING COUNT_IF(s.is_completed) > 0  -- DEFINITION CHANGE: active trader = >=1 completed trade; needs owner sign-off
+  -- DEFINITION CHANGE: active trader = >=1 completed trade; needs owner sign-off
+  HAVING COUNT_IF(s.is_completed) > 0
 )
 SELECT w.week, COALESCE(u.signup_country, 'UNKNOWN') AS country,
        COUNT(*) AS active_traders, SUM(w.completed_trades) AS completed_trades
 FROM trades_wk w
-LEFT JOIN dim_user u ON u.user_id = w.user_id    -- earliest users row per user: 1 row per user (tested)
+LEFT JOIN dim_user u ON u.user_id = w.user_id    -- earliest users row: 1 row per user (tested)
 GROUP BY 1, 2;
 ```
 

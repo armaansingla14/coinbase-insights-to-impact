@@ -41,7 +41,8 @@ def parse_iso(v):
 PARSERS = {
     "iso": parse_iso,
     "epoch_ms": lambda v: datetime.fromtimestamp(float(v) / 1000, tz=UTC),
-    "naive_pt": lambda v: datetime.strptime(v, "%Y-%m-%d %H:%M:%S").replace(tzinfo=PT).astimezone(UTC),
+    "naive_pt": lambda v: (datetime.strptime(v, "%Y-%m-%d %H:%M:%S")
+                           .replace(tzinfo=PT).astimezone(UTC)),
 }
 
 
