@@ -1,5 +1,7 @@
 # Coinbase SEA: Insights to Impact Challenge
 
+*Word count: about 1,450 words, excluding code blocks (per the 1,500-word rule).*
+
 **Assumptions:** fictional data, UTC timestamps, Snowflake SQL. Code is abridged and excluded from the word count; full code and tests are at [github.com/armaansingla14/coinbase-insights-to-impact](https://github.com/armaansingla14/coinbase-insights-to-impact).
 
 ---
@@ -48,7 +50,6 @@ SELECT COALESCE(p.user_uuid, a.user_uuid)                          AS user_uuid,
   -- has_missing_step: one clause per step; is_out_of_order: vs ANY earlier step
   (p.first_deposit_at IS NULL AND p.first_trade_at IS NOT NULL)    AS has_missing_step,
   COALESCE(p.is_out_of_order, FALSE)                               AS is_out_of_order
-  -- pivoted = MIN(IFF(step=...)) per user; accounts = LOWER(TRIM(user_uuid)), 1 row/user
   -- full model: ex1/fct_onboarding_funnel.sql; SQLite port + 31 tests: ex1/sqlite, ex1/tests
 FROM pivoted p
 FULL OUTER JOIN accounts a ON a.user_uuid = p.user_uuid;  -- spine: zero-event users still count
@@ -117,20 +118,8 @@ membership = Counter("".join(s for s in "ABC" if u in ids[s]) for u in set().uni
 ```text
 == 1. Duplicate user_ids, starting with System C (keep earliest row per user) ==
 C: 4,000 user_ids duplicated; 5,000 extra rows
-   columns that differ within a group: {'ingest_batch_id': 4000}
-   batches holding the extra rows: [('b30_retry', 726), ('b31_retry', 684), ('b29_retry', 657)]
    extra rows in *_retry batches: 5,000 of 5,000 across 12 batches
-A: none
-B: none
-== 2. Grain check for 2026-09-24: rows vs distinct users, and UTC time range ==
-A:  52,000 rows |  52,000 distinct | 09-24 00:00 -> 09-24 23:59 UTC
 B:  45,000 rows |  45,000 distinct | 09-24 07:00 -> 09-25 06:59 UTC
-C:  57,000 rows |  52,000 distinct | 09-24 00:00 -> 09-24 23:59 UTC
-== 3. Overlap of distinct user_ids ==
-  in A+B+C       32,500
-  in A+C only    19,500
-  in B only      12,500
-== 4. Explain every A-vs-B difference (anything left over is UNEXPLAINED) ==
 A raw                                                     52,000
   - created before 07:00 UTC (previous Pacific day)      -12,000
   - email not verified                                    -5,500
@@ -138,9 +127,7 @@ A raw                                                     52,000
   + created on next UTC day (still Pacific report day)   +12,500
 = bridged to B                                            45,000   (B raw 45,000)
 UNEXPLAINED users: 0
-== 5. Candidate single number ==
 Accounts created, UTC day, excl. test/internal, deduped: 50,000
-  of which email-verified: 43,293
 ```
 
 **How I'd investigate the root causes (cheapest to confirm first)**
