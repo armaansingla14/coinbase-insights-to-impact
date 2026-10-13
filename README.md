@@ -22,9 +22,10 @@ ex1/  Exercise 1: onboarding funnel data model
                                     plus the data-quality test list
   sqlite/onboarding_funnel_sqlite.sql  same model ported to SQLite (same layers and columns)
   sqlite/build.py                   builds the model on the fixtures and prints the funnel + quarantine
+  sqlite/pm_funnel_query.sql        the example PM query from the doc (SQLite twin)
   sqlite/dq_checks.py               every data-quality check from the SQL file, as executable code
   tests/fixtures.py                 15 hand-built messy users + 400 generated users
-  tests/test_funnel.py              31 unit tests (row-level expectations, invariants, late data, DQ checks)
+  tests/test_funnel.py              32 unit tests (row-level expectations, invariants, late data, DQ checks, PM query)
 
 ex2/  Exercise 2: signup reconciliation (A 52K / B 45K / C 57K)
   make_fake_data.py                 generates data/system_{a,b,c}.csv with planted problems (fixed seed)
@@ -53,7 +54,7 @@ Or one suite at a time:
 
 | Suite | Command |
 |---|---|
-| Ex1 model, 31 tests | `python3 -m unittest discover -s ex1/tests -v` |
+| Ex1 model, 32 tests | `python3 -m unittest discover -s ex1/tests -v` |
 | Ex1 build + DQ checks on fixtures | `python3 ex1/sqlite/build.py` |
 | Ex2 reconciliation, 13 tests | `python3 -m unittest discover -s ex2 -v` |
 | Ex2 generate data (run first; CSVs are not committed) | `python3 ex2/make_fake_data.py` (fixed seed: 52,000 / 45,000 / 57,000 rows) |

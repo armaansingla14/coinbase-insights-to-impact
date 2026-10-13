@@ -5,7 +5,7 @@
 --   non-point-in-time filter and stops web-only users from disappearing).
 -- * Status meaning comes from dim_trade_status, not magic numbers. LEFT JOIN so an unmapped
 --   status is visible (n_unmapped_status) instead of silently dropped; a DQ test fails on it.
--- * Weeks are UTC, Monday-start. created_at is assumed stored as UTC.
+-- * Weeks are UTC, Monday-start. created_at is assumed TIMESTAMP_TZ (stored as UTC); if NTZ, use 3-arg CONVERT_TIMEZONE.
 --   Snowflake: DATE_TRUNC('week', CONVERT_TIMEZONE('UTC', t.created_at))  (WEEK_START = 0/1 => Monday)
 --   SQLite (used by the tests): DATE(t.created_at, '-6 days', 'weekday 1')
 SELECT

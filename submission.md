@@ -1,20 +1,18 @@
 # Coinbase SEA: Insights to Impact Challenge
 
-*Word count: about 1,450 words, excluding code blocks (per the 1,500-word rule).*
-
-**Assumptions:** fictional data, UTC timestamps, Snowflake SQL. Code is abridged and excluded from the word count; full code and tests are at [github.com/armaansingla14/coinbase-insights-to-impact](https://github.com/armaansingla14/coinbase-insights-to-impact).
+**Word count:** ~1,490 (AI disclosure included; code blocks excluded). **Assumptions:** fictional data, UTC timestamps, Snowflake SQL. Code is abridged; full code and tests: [github.com/armaansingla14/coinbase-insights-to-impact](https://github.com/armaansingla14/coinbase-insights-to-impact).
 
 ---
 
 ## Exercise 1: Design the Data Model
 
-**Goal:** one row per user, so the PM can build the funnel without joins.
+**Goal:** one row per user, so the PM can see which step leaks most for each sign-up cohort, without joins.
 
 **Layers**
 
 | Layer | Grain | Job |
 |---|---|---|
-| `stg_onboarding_events` | source event | Cast timestamps to UTC, `lower(trim())` IDs, map events to 5 steps |
+| `stg_app`, `stg_kyc`, `stg_ledger` | source event | One per source table, same output: UTC timestamps, `lower(trim())` IDs, 5 steps; unioned as `stg_onboarding_events` |
 | `int_identity_map` | source ref → `user_uuid` | Deterministic links only (accounts, anon-id↔login) |
 | `int_onboarding_quarantine` | rejected event | Unmatched refs, unreadable timestamps, with reason |
 | `fct_onboarding_events` | user × step | First occurrence, plus `n_source_events` so retries stay visible |
@@ -22,7 +20,7 @@
 
 **Keys.** `user_uuid` from the accounts system of record is the only join key. Emails, devices and anonymous IDs only resolve *to* it. No fuzzy matching: a few extra matches aren't worth an unauditable key. Per step, backend records (KYC decision, ledger deposit, trade fill) outrank client events, which blockers and retries distort.
 
-**Timestamps.** Each format (epoch, ISO with offset, local time plus timezone column) gets its own parser to `event_ts_utc`.
+**Timestamps.** One parser per format (epoch, ISO with offset, local time plus zone column), all to `event_ts_utc`.
 
 **Missing and out-of-order events: flag them, don't "fix" them**
 
@@ -47,29 +45,40 @@ SELECT COALESCE(p.user_uuid, a.user_uuid)                          AS user_uuid,
   COALESCE(p.signup_at, a.created_at)                              AS signup_at,
   p.signup_at IS NULL                                              AS signup_event_missing,
   (p.first_deposit_at IS NOT NULL OR p.first_trade_at IS NOT NULL) AS reached_first_deposit,
-  -- has_missing_step: one clause per step; is_out_of_order: vs ANY earlier step
+  -- reached_* / has_missing_step: one clause per step (deposit shown); out-of-order: vs ANY step
   (p.first_deposit_at IS NULL AND p.first_trade_at IS NOT NULL)    AS has_missing_step,
   COALESCE(p.is_out_of_order, FALSE)                               AS is_out_of_order
-  -- full model: ex1/fct_onboarding_funnel.sql; SQLite port + 31 tests: ex1/sqlite, ex1/tests
+  -- full model: ex1/fct_onboarding_funnel.sql; SQLite port + 32 tests: ex1/sqlite, ex1/tests
 FROM pivoted p
 FULL OUTER JOIN accounts a ON a.user_uuid = p.user_uuid;  -- spine: zero-event users still count
 ```
 
+```sql
+-- What the PM runs: 7-day conversion by weekly sign-up cohort (tested in ex1/sqlite)
+SELECT DATE_TRUNC('week', signup_at) AS cohort_week, COUNT(*) AS signups,
+       AVG(IFF(COALESCE(first_deposit_at, first_trade_at)          -- a trade implies a deposit
+               < DATEADD('day', 7, signup_at), 1, 0))     AS deposit_7d,
+       AVG(IFF(first_trade_at   < DATEADD('day', 7, signup_at), 1, 0)) AS trade_7d
+FROM fct_onboarding_funnel
+WHERE signup_at < DATEADD('day', -7, CURRENT_TIMESTAMP())       -- immature cohorts excluded
+GROUP BY 1 ORDER BY 1;
+```
+
 **Data quality checks** (*error* blocks the build and pages the owner; *warn* flags trends)
 
-- Grain: `user_uuid` unique, not null; `(user_uuid, step)` unique; accepted `step` values.
+- Grain: `user_uuid` unique, not null; `(user_uuid, step)` unique; accepted `step` values; `user_ref` unique in `int_identity_map`.
 - Identity match rate ≥ 99%. Nothing is silently dropped: staged = used + quarantined.
 - Reconciliation: funnel sign-ups vs. `accounts` created per day, within 0.5%.
 - No future or pre-2012 timestamps (parse failures). Out-of-order < 2%. Freshness < 6h.
 - Alert when the `ts_was_assumed_utc` rate jumps (a client release dropped the offset).
 
-**Verified** in SQLite on 15 hand-built messy users (mixed ID case, offsets, epochs, DST, replays, gaps) plus 400 generated; every check fires when its fault is planted. Testing caught first-draft bugs, now pinned as regression tests, e.g. upper-case UUIDs losing deposits.
+**Verified** in SQLite on 15 messy users plus 400 generated; every check fires when its fault is planted. Testing caught real first-draft bugs (upper-case UUIDs lost deposits), now regression tests.
 
 ---
 
 ## Exercise 2: The Data Doesn't Add Up
 
-**First instinct:** check the *grain* before comparing totals, starting with C's duplicate IDs. I built synthetic CSVs (A 52,000, B 45,000, C 57,000 rows) with planted problems; the script finds them blind; 13 unit tests confirm exact recovery, including malformed rows and DST.
+**First instinct:** check the *grain* before comparing totals, starting with C's duplicate IDs. **Two hours:** 30 min on grain and duplicates, 60 confirming definitions with system owners, 30 on the PM note. To test the script, I planted the usual suspects (replays, timezone windows, filters) in synthetic 52K/45K/57K extracts.
 
 ```python
 # ex2/reconcile_signups.py (stdlib only; abridged. Full script + unit tests in ex2/)
@@ -88,6 +97,10 @@ def load(path, id_col, ts_col, ts_fmt):
                 r["ts_utc"] = PARSERS[ts_fmt]((r.get(ts_col) or "").strip())
             except (ValueError, OverflowError, OSError):
                 r["ts_utc"] = None
+            if not r["uid"]:
+                bad["blank user_id"] += 1
+            elif r["ts_utc"] is None:
+                bad["unparseable timestamp"] += 1
     ...
 
 def duplicates(rows):
@@ -130,15 +143,15 @@ UNEXPLAINED users: 0
 Accounts created, UTC day, excl. test/internal, deduped: 50,000
 ```
 
-**How I'd investigate the root causes (cheapest to confirm first)**
+**What the synthetic run shows, and how I'd confirm each on real data (cheapest first)**
 
-1. **C (57K):** duplicates differ only in `ingest_batch_id`; all 5,000 extras are `_retry`/`_retry2` copies of the six 13:00–16:00 UTC batches (b26–b31): replayed ingestion. Deduplicated, C's IDs match A's. I'd confirm with the pipeline owner and request an upstream uniqueness test.
+1. **C (57K):** duplicates differ only in `ingest_batch_id`; all 5,000 extras are `_retry`/`_retry2` copies of six 13:00–16:00 UTC batches (b26–b31, hence 12 replay batches): replayed ingestion. Deduplicated, C's IDs match A's. I'd confirm with the pipeline owner and request an upstream uniqueness test.
 2. **B (45K):** starts at 07:00 UTC, so B uses a Pacific day. Every A-only user is test, unverified, or pre-07:00 UTC. B means "verified sign-ups, Pacific day, excluding test": a *different metric* with the same name.
 3. **A (52K):** includes 2,000 internal/QA accounts.
 4. With real data: get each owner's written definition, check bot/KYC-reject filters, re-pull next day for late rows. I don't quote a number until UNEXPLAINED is zero.
 
 **What I'd send the PM (same day)**
-> "Use **50,000 new accounts** (created on 9/24 UTC, excluding internal/test accounts). The systems aren't disagreeing about facts; they count different things: C double-counts replayed batches, B uses Pacific time and only counts email-verified users (43.3K of the 50K are verified), and A includes test accounts. I've reconciled all three with zero unexplained users. Suggested footnote: *'Sign-ups = accounts created, UTC day, excl. internal.'* Risk: the test-account filter uses email domains, so the number could move by around ±1% once confirmed with Eng. I'll have that by Thursday."
+> "Use **50,000 new accounts** (created on 9/24 UTC, excluding internal/test accounts). The systems aren't disagreeing about facts; they count different things: C double-counts replayed batches, B uses Pacific time and only counts email-verified users, and A includes test accounts. I've reconciled all three with zero unexplained users. Suggested footnote: *'Sign-ups = accounts created, UTC day, excl. internal.'* Risk: the test-account filter uses email domains, so the number could move by around ±1% once confirmed with Eng. I'll have that by Thursday."
 
 If earlier decks used B, I'd restate last week on the new basis so the change doesn't read as ~11% growth.
 
@@ -154,30 +167,30 @@ If earlier decks used B, I'd restate last week on the new basis so the change do
 |---|---|---|
 | 1 | Joining `devices` **fans out rows** | Each trade repeats per active device, inflating `completed_trades` (2 trades × 3 devices = 6). `COUNT(DISTINCT)` shields `active_traders` within a country, not across countries (see 6). **Same bug as Exercise 4's 41%.** |
 | 2 | `d.is_active = 1` | *Current* state, not state that week. Web-only users and later-deactivated devices silently vanish; re-running a past week changes it. |
-| 3 | `status = 1 OR 3` | Magic numbers. `active_traders` counts *any* status (even failed), `completed_trades` filters: two definitions. |
+| 3 | `status = 1 OR status = 3` | Magic numbers. `active_traders` counts *any* status (even failed), `completed_trades` filters: two definitions. |
 | 4 | Implicit comma joins | One dropped predicate silently becomes a cross join. |
 | 5 | Hardcoded dates; timezone unknown | Not really "weekly"; boundaries may shift by country. |
 | 6 | `u.country` | Current or sign-up? Country history fans out too: user counted in both countries, trades doubled. |
 
-The snippet already groups by country, so the cut is likely lost in a later rollup. Per-country traders sum to the total only if each user has one `users` row.
+The snippet already groups by country, so the cut is likely lost in a later rollup.
 
 **How I'd get the country cut out without breaking the metric**
 
-1. **Freeze a baseline.** Snapshot 12 weeks.
+1. **Freeze a baseline.** Snapshot 12 weeks so any change is measurable, not arguable.
 2. **Map the blast radius.** Lineage shows downstream dashboards and owners.
 3. **Characterization tests.** Pin current totals; my change must reproduce them.
-4. **Additive delivery.** Expose country with existing logic *unchanged*, reconciled to the baseline, labeled *"Legacy definition; known issues in DATA-123."*
+4. **Additive delivery.** Expose country with existing logic *unchanged*, reconciled to the baseline, labeled *"Legacy definition; known issues in DATA-123."* The PM gets the cut before Friday; nobody's number moves silently.
 5. **Fix in the open.** Build `v2` side by side, quantify the difference, switch only after metric-owner sign-off.
 
-**To the PM:** "Country cut by Thursday, matching last week's total. Caveat: multi-device users inflate trade counts (the 41% issue) and web-only traders are missing; fixes follow the review."
+**To the PM:** "Country cut by Thursday, matching last week's total. Present trader counts, not trade counts, which multi-device users inflate (the 41% issue); web-only traders are missing. Fixes follow the review."
 
-Verified on a 7-user SQLite fixture: legacy reports 11 completed trades against 8 real; its trader total matches only because errors cancel.
+Verified on a 7-user SQLite fixture: legacy reports 11 completed trades against 8 real; its trader total matches only because dropped web-only traders offset counted failed-only ones.
 
 ```sql
 -- v2 sketch: dedupe to user-week before counting; statuses from a lookup, not literals
 WITH trades_wk AS (                                    -- 1 row per user-week (tested)
   SELECT t.user_id,
-         -- created_at converted to UTC; WEEK_START = 1 (Monday)
+         -- assumes created_at is TIMESTAMP_TZ (if NTZ: 3-arg CONVERT_TIMEZONE); WEEK_START = 1
          DATE_TRUNC('week', CONVERT_TIMEZONE('UTC', t.created_at)) AS week,
          COUNT_IF(s.is_completed)                                  AS completed_trades
   FROM trades t
@@ -189,7 +202,7 @@ WITH trades_wk AS (                                    -- 1 row per user-week (t
 SELECT w.week, COALESCE(u.signup_country, 'UNKNOWN') AS country,
        COUNT(*) AS active_traders, SUM(w.completed_trades) AS completed_trades
 FROM trades_wk w
-LEFT JOIN dim_user u ON u.user_id = w.user_id    -- earliest users row: 1 row per user (tested)
+LEFT JOIN dim_user u ON u.user_id = w.user_id    -- sign-up country (owner to confirm); 1 row/user
 GROUP BY 1, 2;
 ```
 
@@ -203,7 +216,7 @@ GROUP BY 1, 2;
 
 ## Exercise 4: Your Number Is "Wrong"
 
-**First, what are we counting?** The 41% divides trading user-*device* pairs by weekly active *users*, so it isn't a share of users. Before talking to the PM, I reproduce both from my model: user-device pairs give 41%, users give 34%. The gap is Exercise 3's fan-out (a 100-user fixture confirms: 7 two-device traders turn 34% into 41%).
+**First, what are we counting?** The 41% divides trading user-*device* pairs by weekly active *users*, so it isn't a share of users. I first reproduce both from my model: user-device pairs give 41%, users give 34%. The gap is Exercise 3's fan-out (a 100-user fixture confirms: 7 two-device traders turn 34% into 41%).
 
 **What I'd say to the PM, privately and right away:**
 > "I won't derail your review. But forcing my table to 41% gives us two broken tables instead of one. 41% counts trading devices; 34% counts people. Trading didn't drop; only the counting changed. Better we raise the double count than leadership finds it. Here's how we keep Friday clean."
@@ -220,7 +233,7 @@ GROUP BY 1, 2;
 1. **Quantify the gap** by week and segment. Key question: *does it change any decision, or only the level?* The gap tracks multi-device adoption; if that shifted, past trend calls were biased too.
 2. **Audit decisions.** Flag goals or experiments that crossed a threshold only due to inflation.
 3. **Write one definition** in the semantic layer (grain, filters, owner). Growth leadership signs off, not me.
-4. **Run both in parallel**, clearly labeled, for about 2 review cycles.
+4. **Run both in parallel**, clearly labeled, for about 2 review cycles, so the gap is understood before the switch.
 5. **Cut over with a changelog.** Restate history, retire the legacy tile, and add a test that fails if the grain exceeds one row per user.
 
 ---

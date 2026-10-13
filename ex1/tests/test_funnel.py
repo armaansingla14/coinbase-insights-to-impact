@@ -280,3 +280,32 @@ class TestSnowflakeSqliteParity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestPmFunnelQuery(unittest.TestCase):
+    """The example PM query in submission.md must agree with an independent Python computation."""
+
+    def test_query_matches_python(self):
+        from collections import defaultdict
+        from datetime import datetime, timedelta
+        conn, _ = fresh()
+        sql = (HERE.parent / "sqlite" / "pm_funnel_query.sql").read_text()
+        got = {r[0]: (r[1], round(r[2], 6), round(r[3], 6))
+               for r in conn.execute(sql, {"now": fx.NOW}).fetchall()}
+
+        def ts(v):
+            return None if v is None else datetime.fromisoformat(str(v))
+        now = ts(fx.NOW)
+        cohorts = defaultdict(list)
+        for signup, dep, trade in conn.execute(  # a trade with no deposit event still counts as deposited
+                "SELECT signup_at, first_deposit_at, first_trade_at FROM fct_onboarding_funnel"):
+            s = ts(signup)
+            if s >= now - timedelta(days=7):
+                continue                                          # immature cohort
+            week = (s - timedelta(days=s.weekday())).date().isoformat()
+            in7 = lambda t: t is not None and ts(t) < s + timedelta(days=7)
+            cohorts[week].append((in7(dep if dep is not None else trade), in7(trade)))
+        want = {w: (len(v), round(sum(d for d, _ in v) / len(v), 6), round(sum(t for _, t in v) / len(v), 6))
+                for w, v in cohorts.items()}
+        self.assertTrue(want, "fixture should contain mature cohorts")
+        self.assertEqual(got, want)
