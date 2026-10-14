@@ -21,3 +21,11 @@ SELECT user_id, week_start, COUNT(*) AS n_rows
 FROM fct_user_week_trades
 GROUP BY user_id, week_start
 HAVING COUNT(*) > 1;
+
+-- name: trade_status_lookup_duplicates
+-- dim_trade_status must have one row per status_id. A duplicate would multiply every trade with
+-- that status in the LEFT JOIN, inflating n_trades_any_status and n_completed_trades.
+SELECT status_id, COUNT(*) AS n_rows
+FROM dim_trade_status
+GROUP BY status_id
+HAVING COUNT(*) > 1;

@@ -25,15 +25,15 @@ bash run_all_tests.sh          # every suite; exits non-zero on any failure
 
 | Suite | Command | Tests |
 |---|---|---|
-| Ex1 funnel model (SQLite port) | `python3 -m unittest discover -s ex1/tests` | 55 |
+| Ex1 funnel model (SQLite port) | `python3 -m unittest discover -s ex1/tests` | 57 |
 | Ex1 build + data-quality checks | `python3 ex1/sqlite/build.py` | prints results |
 | Ex2 generate data (run before the end-to-end run) | `python3 ex2/make_fake_data.py` | fixed seed |
 | Ex2 reconciliation | `python3 -m unittest discover -s ex2` | 28 |
 | Ex2 end-to-end run | `python3 ex2/reconcile_signups.py [--day YYYY-MM-DD --data DIR]` | prints bridge |
-| Ex3 + Ex4 pipeline | `python3 -m unittest ex3/test_pipeline.py` | 37 |
-| Word count | `python3 wordcount.py submission.md` | limit 1,500 |
+| Ex3 + Ex4 pipeline | `python3 -m unittest ex3/test_pipeline.py` | 39 |
+| Word count | `python3 wordcount.py submission.md` | fails above 1,500 |
 
-Last full run: 120 tests, all passing.
+Last full run: 124 tests, all passing.
 
 ## Layout
 
@@ -61,7 +61,7 @@ ex3/  Exercise 3 (inherited pipeline) and Exercise 4 (41% vs 34%)
   country_cut_legacy_logic.sql      country cut on unchanged legacy logic + explicit reconciliation output
   v2_fct_user_week_trades.sql       v2: one row per user-week, status lookup, country as of first completed trade
   v2_weekly_active_traders.sql      v2 output by country (additive across countries)
-  v2_dq_checks.sql                  surfaces users whose trades all have unmapped statuses
+  v2_dq_checks.sql                  unmapped statuses, status-lookup uniqueness, user-week grain
   ex4_device_vs_user_rate.sql       device-level vs user-level "% of WAU who traded"
   ex4_other_mechanisms.sql          other mechanisms that can move the same rate
   test_pipeline.py                  legacy characterization (pins known errors), v2, DQ and Ex4 tests
@@ -71,7 +71,8 @@ ex3/  Exercise 3 (inherited pipeline) and Exercise 4 (41% vs 34%)
 
 Established, on synthetic data:
 - The funnel model's logic, run through SQLite: observed vs. inferred milestones, conservative identity
-  resolution, quarantine reasons, the half-open 7-day window and per-week cohort maturity.
+  resolution, quarantine reasons, the half-open 7-day window (on the earliest event at or after sign-up)
+  and per-week cohort maturity.
 - The reconciliation script recovers every planted cause, explains each difference, and is unaffected by
   row order or duplicate rows.
 - Legacy vs. v2 behaviour for each edge case in the Exercise 3 fixture, including where the legacy country

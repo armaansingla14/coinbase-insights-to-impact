@@ -17,7 +17,7 @@ def uid(n):
     return f"b{n:07d}-0000-4000-8000-{n:012d}"
 
 
-H = {f"H{n:02d}": uid(n) for n in range(1, 22)}
+H = {f"H{n:02d}": uid(n) for n in range(1, 23)}
 
 ACCOUNTS = [
     (201, H["H01"], "2024-03-04 10:00:00"), (202, H["H02"], "2024-03-04 12:00:00"),
@@ -30,7 +30,7 @@ ACCOUNTS = [
     (215, H["H15"], "2024-03-07 14:00:00"), (216, H["H16"], "2024-11-02 12:00:00"),
     (217, H["H17"], "2024-10-28 00:00:00"), (218, H["H18"], "2024-11-03 23:59:59"),
     (219, H["H19"], "2024-11-04 09:00:00"), (220, H["H20"], "2024-11-11 09:00:00"),
-    (221, H["H21"], "2024-11-05 10:00:00"),
+    (221, H["H21"], "2024-11-05 10:00:00"), (222, H["H22"], "2024-03-06 12:00:00"),
 ]
 ANON_LINKS = [
     ("anon-H08", H["H08"]), ("dev-H08-phone", H["H08"]), ("dev-H08-web", H["H08"]),  # one user, 3 ids
@@ -79,6 +79,7 @@ APP = [
     ("h-2001", H["H20"], "sign_up", "2024-11-11T09:00:00Z", LOAD_1),
     ("h-2101", H["H21"], "sign_up", "2024-11-05T10:00:00Z", LOAD_1),
     ("h-2102", H["H21"], "email_confirmed", "2024-11-05T10:05:00Z", LOAD_1),
+    ("h-2201", H["H22"], "sign_up", "2024-03-06T12:00:00Z", LOAD_1),
 ]
 
 KYC = [
@@ -119,6 +120,8 @@ LEDGER = [
     ("ht-1701", 217, "deposit", "completed", "2024-10-29 00:00:00", "UTC", LOAD_1),
     ("ht-1901", 219, "trade", "completed", "2024-11-05 09:00:00", "UTC", LOAD_1),
     ("ht-2001", 220, "deposit", "completed", "2024-11-12 09:00:00", "UTC", LOAD_1),
+    ("ht-2201", 222, "trade", "completed", "2024-03-06 11:00:00", "UTC", LOAD_1),     # 1h before sign-up
+    ("ht-2202", 222, "trade", "completed", "2024-03-09 12:00:00", "UTC", LOAD_1),     # day 3: in window
 ]
 LATE_LEDGER = [("ht-1201", 212, "deposit", "completed", "2024-03-11 10:00:00", "UTC", LOAD_LATE)]
 
@@ -167,21 +170,25 @@ EXPECTED_FUNNEL = {
     "H20": ("2024-11-11 09:00:00", 0, I, I, O, N, "2024-11-12 09:00:00", None,
             "2024-11-12 09:00:00", 1, 1, 0, 0),
     "H21": ("2024-11-05 10:00:00", 0, O, R, N, N, None, None, None, 0, 0, 0, 0),
+    # H22: audit first_trade_at keeps the pre-sign-up trade; the window uses the day-3 trade
+    "H22": ("2024-03-06 12:00:00", 0, I, I, N, O, None, "2024-03-06 11:00:00",
+            "2024-03-06 11:00:00", 1, 1, 1, 0),
 }
 # H12 before its late deposit arrives
 EXPECTED_H12_BEFORE_LATE = ("2024-03-10 09:00:00", 0, O, O, N, N, None, None, None, 0, 0, 0, 0)
 
 # (cohort_week, signups, observed_deposit_7d, funding_7d, trade_7d); week D (2024-11-11) is immature.
-#   A: 15 users H01-H15. deposits in window: H02 H06 H07 H08 H12 = 5
-#      trades in window: H01 H02 H04 H10 H11 H13 H14 = 7; funding = union = 11
+#   A: 16 users H01-H15 + H22. deposits in window: H02 H06 H07 H08 H12 = 5
+#      trades in window: H01 H02 H04 H10 H11 H13 H14 H22 = 8; funding = union = 12
+#      (H22: first trade 1h BEFORE sign-up, second trade on day 3 -> counted via the day-3 trade)
 #      not counted: H01 deposit (day 8), H03 trade (before sign-up), H04 deposit (exactly +7d),
 #      H11 deposit (nonexistent local time, quarantined)
 #   B: H16 H17 H18; deposits H16 (DST-overlap, 05:30 UTC) H17 = 2; no trades
 #   C: H19 H21; H19 trade = 1
-EXPECTED_PM = [("2024-03-04", 15, 5, 11, 7),
+EXPECTED_PM = [("2024-03-04", 16, 5, 12, 8),
                ("2024-10-28", 3, 2, 2, 0),
                ("2024-11-04", 2, 0, 1, 1)]
-EXPECTED_PM_BEFORE_LATE = [("2024-03-04", 15, 4, 10, 7),       # H12's deposit not loaded yet
+EXPECTED_PM_BEFORE_LATE = [("2024-03-04", 16, 4, 11, 8),       # H12's deposit not loaded yet
                            ("2024-10-28", 3, 2, 2, 0),
                            ("2024-11-04", 2, 0, 1, 1)]
 

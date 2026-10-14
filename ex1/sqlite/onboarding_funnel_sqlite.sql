@@ -189,6 +189,17 @@ spine AS (
     FULL OUTER JOIN accounts a ON a.user_uuid = p.user_uuid
     LEFT JOIN rejected r ON r.user_uuid = COALESCE(p.user_uuid, a.user_uuid)
 ),
+post_signup AS (   -- earliest deposit / trade at or after sign-up, from all resolved occurrences
+    SELECT s.user_uuid,
+           MIN(CASE WHEN e.step = 'first_deposit' THEN e.event_ts_utc END) AS first_deposit_after_signup_at,
+           MIN(CASE WHEN e.step = 'first_trade'   THEN e.event_ts_utc END) AS first_trade_after_signup_at
+    FROM spine s
+    JOIN int_identity_map m ON m.user_uuid = s.user_uuid AND m.link_status = 'resolved'
+    JOIN stg_onboarding_events e ON e.user_ref = m.user_ref
+    WHERE e.step IN ('first_deposit', 'first_trade')
+      AND e.event_ts_utc >= COALESCE(s.signup_at, s.created_at)
+    GROUP BY 1
+),
 states AS (
     SELECT *,
         CASE WHEN email_verified_at IS NOT NULL      THEN 'observed'
@@ -217,6 +228,7 @@ SELECT
     email_verified_at, identity_verified_at, first_deposit_at, first_trade_at,
     MIN(COALESCE(first_deposit_at, first_trade_at),
         COALESCE(first_trade_at, first_deposit_at))                            AS first_funding_at,
+    ps.first_deposit_after_signup_at, ps.first_trade_after_signup_at,
     email_verified_state, identity_verified_state, first_deposit_state, first_trade_state,
     email_verified_state IN ('observed', 'inferred')              AS reached_email_verified,
     identity_verified_state IN ('observed', 'inferred')           AS reached_identity_verified,
@@ -231,4 +243,5 @@ SELECT
     datediff_minute(signup_at, first_trade_at)                                 AS minutes_signup_to_first_trade,
     CURRENT_TIMESTAMP                                                          AS _loaded_at
 FROM states
+LEFT JOIN post_signup ps USING (user_uuid)
 WHERE COALESCE(signup_at, created_at) IS NOT NULL;

@@ -6,10 +6,10 @@ WITH users AS (
     SELECT
         date(signup_at, '-' || ((CAST(strftime('%w', signup_at) AS INTEGER) + 6) % 7) || ' days')
                                                                                     AS cohort_week,
-        COALESCE(first_deposit_at >= signup_at
-                 AND first_deposit_at < datetime(signup_at, '+7 days'), 0)          AS deposit_in_7d,
-        COALESCE(first_trade_at >= signup_at
-                 AND first_trade_at < datetime(signup_at, '+7 days'), 0)            AS trade_in_7d
+        COALESCE(first_deposit_after_signup_at                  -- >= signup_at by construction
+                 < datetime(signup_at, '+7 days'), 0)                  AS deposit_in_7d,
+        COALESCE(first_trade_after_signup_at
+                 < datetime(signup_at, '+7 days'), 0)                  AS trade_in_7d
     FROM fct_onboarding_funnel
 )
 SELECT cohort_week,

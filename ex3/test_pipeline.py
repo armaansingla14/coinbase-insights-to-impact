@@ -320,6 +320,22 @@ class TestDataQuality(Base):
         self.assertEqual(self.dq("users_with_only_unmapped_trades"), [("u10", WEEK, 2)])
         self.assertEqual(self.q("SELECT is_active_trader FROM fct_user_week_trades WHERE user_id='u10'"), [(0,)])
 
+    def test_trade_status_lookup_is_unique(self):
+        self.assertEqual(self.dq("trade_status_lookup_duplicates"), [])
+
+    def test_duplicate_status_row_is_detected_and_would_inflate_v2(self):
+        # The fixture table has a PRIMARY KEY; warehouse lookups often don't. Rebuild it without one
+        # and plant a second row for status 1.
+        week_status1 = self.q("SELECT COUNT(*) FROM trades WHERE status = 1 "
+                              f"AND DATE(created_at, '-6 days', 'weekday 1') = '{WEEK}'")[0][0]
+        self.db.executescript("DROP VIEW fct_user_week_trades; "
+                              "CREATE TABLE ds AS SELECT * FROM dim_trade_status; DROP TABLE dim_trade_status; "
+                              "ALTER TABLE ds RENAME TO dim_trade_status; "
+                              "INSERT INTO dim_trade_status VALUES (1, 'FILLED_DUPLICATE', 1);")
+        self.db.execute(f"CREATE VIEW fct_user_week_trades AS {sql('v2_fct_user_week_trades.sql')}")
+        self.assertEqual(self.dq("trade_status_lookup_duplicates"), [(1, 2)])
+        self.assertEqual(sum(r[3] for r in self.v2()), 11 + week_status1)  # each status-1 trade counted twice
+
     def test_new_unmapped_status_is_detected_not_dropped(self):
         self.db.execute("INSERT INTO trades (user_id, status, created_at) VALUES ('u1',99,'2024-01-03 00:00:00')")
         self.assertEqual(self.dq("unmapped_status_trades"), [(4,)])

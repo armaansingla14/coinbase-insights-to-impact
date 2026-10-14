@@ -18,15 +18,16 @@
 --                cohort_week + 14 days <= now (last possible signup + 7 days). SYSDATE() is UTC NTZ,
 --                like signup_at; CURRENT_TIMESTAMP() would follow the session TIMEZONE.
 -- Output is counts; divide by signups for rates.
--- Caveat: uses first occurrences only. A user whose FIRST trade predates signup_at (flagged
--- is_out_of_order) is not counted even if a later trade falls inside the window.
+-- Window events come from first_*_after_signup_at: the earliest event AT OR AFTER signup_at, so a
+-- pre-sign-up first trade (kept in first_trade_at for audit, flagged is_out_of_order) cannot hide a
+-- later trade inside the window.
 WITH users AS (
     SELECT
-        DATEADD('day', 1 - DAYOFWEEKISO(signup_at), DATE(signup_at))    AS cohort_week,
-        COALESCE(first_deposit_at >= signup_at
-             AND first_deposit_at < DATEADD('day', 7, signup_at), FALSE) AS deposit_in_7d,
-        COALESCE(first_trade_at >= signup_at
-             AND first_trade_at < DATEADD('day', 7, signup_at), FALSE)   AS trade_in_7d
+        DATEADD('day', 1 - DAYOFWEEKISO(signup_at), DATE(signup_at))  AS cohort_week,
+        COALESCE(first_deposit_after_signup_at                  -- >= signup_at by construction
+                 < DATEADD('day', 7, signup_at), FALSE)                AS deposit_in_7d,
+        COALESCE(first_trade_after_signup_at
+                 < DATEADD('day', 7, signup_at), FALSE)                AS trade_in_7d
     FROM analytics.fct_onboarding_funnel
 )
 SELECT cohort_week,

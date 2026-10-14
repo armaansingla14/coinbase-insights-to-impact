@@ -231,6 +231,19 @@ spine AS (
     FULL OUTER JOIN accounts a ON a.user_uuid = p.user_uuid
     LEFT JOIN rejected r ON r.user_uuid = COALESCE(p.user_uuid, a.user_uuid)
 ),
+post_signup AS (   -- earliest deposit / trade AT OR AFTER sign-up, from ALL resolved occurrences.
+                   -- fct_onboarding_events keeps only the first occurrence, so a pre-sign-up first trade
+                   -- would otherwise hide a valid later one from the 7-day window. first_*_at stay as audit.
+    SELECT s.user_uuid,
+           MIN(IFF(e.step = 'first_deposit', e.event_ts_utc, NULL)) AS first_deposit_after_signup_at,
+           MIN(IFF(e.step = 'first_trade',   e.event_ts_utc, NULL)) AS first_trade_after_signup_at
+    FROM spine s
+    JOIN analytics.int_identity_map m ON m.user_uuid = s.user_uuid AND m.link_status = 'resolved'
+    JOIN analytics.stg_onboarding_events e ON e.user_ref = m.user_ref
+    WHERE e.step IN ('first_deposit', 'first_trade')
+      AND e.event_ts_utc >= COALESCE(s.signup_at, s.created_at)
+    GROUP BY 1
+),
 states AS (     -- A1-A3: precedence observed > inferred > rejected_event > not_reached
     SELECT *,
         CASE WHEN email_verified_at IS NOT NULL      THEN 'observed'
@@ -260,6 +273,7 @@ SELECT
     LEAST(COALESCE(first_deposit_at, first_trade_at),   -- LEAST is NULL if any arg is NULL,
           COALESCE(first_trade_at, first_deposit_at))   -- so compare only non-null values
                                                                  AS first_funding_at,
+    ps.first_deposit_after_signup_at, ps.first_trade_after_signup_at,  -- window-eligible (>= signup_at)
     email_verified_state, identity_verified_state, first_deposit_state, first_trade_state,
 
     email_verified_state IN ('observed', 'inferred')              AS reached_email_verified,
@@ -280,6 +294,7 @@ SELECT
                                                                  AS minutes_signup_to_first_trade,
     CURRENT_TIMESTAMP()                                          AS _loaded_at
 FROM states
+LEFT JOIN post_signup ps USING (user_uuid)
 WHERE COALESCE(signup_at, created_at) IS NOT NULL;               -- no anchor -> test "no_signup_anchor" below
 -- Incremental in production: reprocess users with any event OR new identity link loaded in the last 7 days
 -- (late data; a late anon->user link re-keys old events), MERGE on user_uuid so reruns are idempotent;

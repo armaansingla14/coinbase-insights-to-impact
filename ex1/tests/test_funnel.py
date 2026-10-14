@@ -374,7 +374,7 @@ class TestHandCalculated(unittest.TestCase):
             with self.subTest(user=name):
                 self.assertEqual(hc_row(self.conn, name), exp)
         n = self.conn.execute("SELECT COUNT(*) FROM fct_onboarding_funnel").fetchone()[0]
-        self.assertEqual(n, 21)
+        self.assertEqual(n, 22)
 
     def test_quarantine_hand_calculated(self):
         got = {tuple(r) for r in self.conn.execute(
@@ -394,6 +394,31 @@ class TestHandCalculated(unittest.TestCase):
     def test_trade_before_signup_not_counted(self):
         conn = build_handcalc(late=False, **hc.only("H03"))
         self.assertEqual(pm_result(conn), [("2024-03-04", 1, 0, 0, 0)])
+
+    def test_presignup_first_trade_does_not_hide_later_trade_in_window(self):
+        # H22: first trade 1h before sign-up, second trade on day 3. Audit timestamps keep the
+        # pre-sign-up trade; the 7-day window uses the earliest trade at or after sign-up.
+        conn = build_handcalc(late=False, **hc.only("H22"))
+        row = conn.execute("SELECT first_trade_at, first_trade_after_signup_at, is_out_of_order "
+                           "FROM fct_onboarding_funnel").fetchone()
+        self.assertEqual(tuple(row), ("2024-03-06 11:00:00", "2024-03-09 12:00:00", 1))
+        self.assertEqual(pm_result(conn), [("2024-03-04", 1, 0, 1, 1)])
+        # regression guard: the old window on first_trade_at would have missed this user
+        old = conn.execute("SELECT COUNT(*) FROM fct_onboarding_funnel WHERE first_trade_at >= signup_at "
+                           "AND first_trade_at < datetime(signup_at, '+7 days')").fetchone()[0]
+        self.assertEqual(old, 0)
+
+    def test_after_signup_columns_hand_calculated(self):
+        want = {"H01": ("2024-03-12 10:00:00", "2024-03-06 10:00:00"),   # deposit day 8, trade day 2
+                "H02": ("2024-03-05 10:00:00", "2024-03-05 09:00:00"),
+                "H03": (None, None),                                       # only trade is before sign-up
+                "H14": (None, "2024-03-07 15:00:00"),
+                "H22": (None, "2024-03-09 12:00:00")}
+        for name, exp in want.items():
+            with self.subTest(user=name):
+                got = self.conn.execute("SELECT first_deposit_after_signup_at, first_trade_after_signup_at "
+                                        "FROM fct_onboarding_funnel WHERE user_uuid = ?", (hc.H[name],)).fetchone()
+                self.assertEqual(tuple(got), exp)
 
     def test_maturity_boundary(self):
         # week C (2024-11-04) needs now >= 2024-11-18 00:00:00; one second earlier it is not reported
