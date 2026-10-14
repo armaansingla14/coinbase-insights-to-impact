@@ -57,15 +57,15 @@ ACCOUNTS = [
 ]
 ANON_LINKS = [
     ("anon-u01", U["U01"]),
-    ("Anon-U09", U["U09"]),            # link table itself not normalised
-    ("anon-u13", U["U13"]),            # links to a user that has no account
+    (" anon-u09", U["U09"]),           # link table itself not trimmed (anonymous ids are case-SENSITIVE)
+    ("anon-u13", U["U13"]),            # links to a user that has no account -> orphan_link
 ]
 
 APP = [
-    # U01 happy path: anon id (mixed case, padded) for sign-up; +05:30 offset for email
-    ("e-0101", " ANON-U01 ", "sign_up", "2024-03-01T10:00:00Z", LOAD_1),
+    # U01 happy path: anon id (padded) for sign-up; upper-case UUID + 05:30 offset for email
+    ("e-0101", " anon-u01 ", "sign_up", "2024-03-01T10:00:00Z", LOAD_1),
     ("e-0102", f" {U['U01'].upper()}", "email_confirmed", "2024-03-01T15:35:00+05:30", LOAD_1),
-    ("e-0103", " ANON-U01 ", "page_view", "2024-03-01T10:01:00Z", LOAD_1),       # irrelevant event name
+    ("e-0103", " anon-u01 ", "page_view", "2024-03-01T10:01:00Z", LOAD_1),       # irrelevant event name
     # U02 retries / replays
     ("e-0201", U["U02"], "sign_up", "2024-03-02T08:00:00Z", LOAD_1),
     ("e-0201", U["U02"], "sign_up", "2024-03-02T08:00:00Z", LOAD_1),               # exact replay
@@ -99,7 +99,7 @@ APP = [
     # U12 unparseable email timestamp -> quarantine
     ("e-1201", U["U12"], "sign_up", "2024-03-12T10:00:00Z", LOAD_1),
     ("e-1202", U["U12"], "email_confirmed", "not-a-date", LOAD_1),
-    # U13 resolves through anon link, but no sign-up event and no account -> no anchor
+    # U13: anon link points at a user with no account -> orphan_link quarantine
     ("e-1302", "anon-u13", "email_confirmed", "2024-03-06T12:00:00Z", LOAD_1),
     # U06 unmatched anonymous id -> quarantine
     ("e-0601", "anon-orphan-1", "sign_up", "2024-03-06T09:00:00Z", LOAD_1),
@@ -158,48 +158,60 @@ LATE_LEDGER = [("t-0803", 108, "trade", "completed", "2024-03-08 11:00:00", "Eur
 COLS = ("signup_at", "signup_event_missing", "signup_cohort_date", "email_verified_at", "identity_verified_at",
         "first_deposit_at", "first_trade_at", "reached_email_verified", "reached_identity_verified",
         "reached_first_deposit", "reached_first_trade", "has_missing_step", "is_out_of_order", "has_assumed_tz",
-        "minutes_signup_to_first_trade")
+        "minutes_signup_to_first_trade", "email_verified_state", "identity_verified_state", "first_deposit_state",
+        "first_trade_state", "first_funding_at", "reached_funding", "has_dst_ambiguous_ts")
+STATE = {"o": "observed", "i": "inferred", "r": "rejected_event", "n": "not_reached"}
 
 
-def row(signup, miss_signup, cohort, email, idv, dep, trade, r_e, r_i, r_d, r_t, missing, ooo, tz, mins):
+def row(signup, miss_signup, cohort, email, idv, dep, trade, r_e, r_i, r_d, r_t, missing, ooo, tz, mins,
+        states, funding, r_f, dst=0):
+    """states: one letter per step (email, identity, deposit, trade): o/i/r/n, see STATE."""
     return dict(zip(COLS, (signup, miss_signup, cohort, email, idv, dep, trade, r_e, r_i, r_d, r_t,
-                           missing, ooo, tz, mins)))
+                           missing, ooo, tz, mins, *(STATE[c] for c in states), funding, r_f, dst)))
 
 
 EXPECTED = {
     "U01": row("2024-03-01 10:00:00", 0, "2024-03-01", "2024-03-01 10:05:00", "2024-03-01 11:00:00",
-               "2024-03-01 12:30:00", "2024-03-11 13:00:00", 1, 1, 1, 1, 0, 0, 0, 10 * 1440 + 180),
+               "2024-03-01 12:30:00", "2024-03-11 13:00:00", 1, 1, 1, 1, 0, 0, 0, 10 * 1440 + 180,
+               "oooo", "2024-03-01 12:30:00", 1),
     "U02": row("2024-03-02 08:00:00", 0, "2024-03-02", "2024-03-02 08:10:00", "2024-03-02 09:00:00",
-               "2024-03-02 10:00:00", None, 1, 1, 1, 0, 0, 0, 0, None),
+               "2024-03-02 10:00:00", None, 1, 1, 1, 0, 0, 0, 0, None, "ooon", "2024-03-02 10:00:00", 1),
     "U03": row("2024-03-03 12:00:00", 0, "2024-03-03", "2024-03-03 12:05:00", None,
-               "2024-03-03 13:00:00", None, 1, 1, 1, 0, 1, 0, 0, None),
+               "2024-03-03 13:00:00", None, 1, 1, 1, 0, 1, 0, 0, None, "oion", "2024-03-03 13:00:00", 1),
     "U04": row("2024-03-04 10:00:00", 0, "2024-03-04", "2024-03-04 09:55:00", "2024-03-04 11:00:00",
-               None, None, 1, 1, 0, 0, 0, 1, 0, None),
+               None, None, 1, 1, 0, 0, 0, 1, 0, None, "oonn", None, 0),
     "U05": row("2024-03-05 06:00:00", 1, "2024-03-05", "2024-03-05 06:10:00", "2024-03-05 06:30:00",
-               "2024-03-05 06:45:00", "2024-03-05 07:00:00", 1, 1, 1, 1, 0, 0, 0, None),
+               "2024-03-05 06:45:00", "2024-03-05 07:00:00", 1, 1, 1, 1, 0, 0, 0, None,
+               "oooo", "2024-03-05 06:45:00", 1),
     "U07": row("2024-03-07 08:00:30", 0, "2024-03-07", "2024-03-07 08:10:00", "2024-03-07 08:20:00",
-               "2024-03-07 10:00:00", None, 1, 1, 1, 0, 0, 0, 0, None),
+               "2024-03-07 10:00:00", None, 1, 1, 1, 0, 0, 0, 0, None, "ooon", "2024-03-07 10:00:00", 1),
     "U07B": row("2024-03-07 08:30:00", 0, "2024-03-07", "2024-03-07 08:40:00", "2024-03-07 08:50:00",
-                None, None, 1, 1, 0, 0, 0, 0, 0, None),
+                None, None, 1, 1, 0, 0, 0, 0, 0, None, "oonn", None, 0),
     "U08": row("2024-03-08 08:00:00", 0, "2024-03-08", "2024-03-08 08:30:00", None,
-               "2024-03-08 10:00:00", "2024-03-08 12:00:00", 1, 1, 1, 1, 1, 0, 0, 240),
+               "2024-03-08 10:00:00", "2024-03-08 12:00:00", 1, 1, 1, 1, 1, 0, 0, 240,
+               "oioo", "2024-03-08 10:00:00", 1),
     "U09": row("2024-03-09 10:00:00", 0, "2024-03-09", None, None,
-               "2024-03-09 12:00:00", None, 1, 1, 1, 0, 1, 0, 1, None),
-    "U10": row("2024-03-10 23:30:00", 1, "2024-03-10", None, None, None, None, 0, 0, 0, 0, 0, 0, 0, None),
+               "2024-03-09 12:00:00", None, 1, 1, 1, 0, 1, 0, 1, None, "iion", "2024-03-09 12:00:00", 1),
+    "U10": row("2024-03-10 23:30:00", 1, "2024-03-10", None, None, None, None, 0, 0, 0, 0, 0, 0, 0, None,
+               "nnnn", None, 0),
     "U11": row("2024-03-11 00:00:00", 0, "2024-03-11", "2024-03-11 00:05:00", None, None, None,
-               1, 0, 0, 0, 0, 0, 0, None),
-    "U12": row("2024-03-12 10:00:00", 0, "2024-03-12", None, None, None, None, 0, 0, 0, 0, 0, 0, 0, None),
+               1, 0, 0, 0, 0, 0, 0, None, "onnn", None, 0),
+    "U12": row("2024-03-12 10:00:00", 0, "2024-03-12", None, None, None, None, 0, 0, 0, 0, 0, 0, 0, None,
+               "rnnn", None, 0),
     "U14": row("2024-03-04 10:00:00", 0, "2024-03-04", None, "2024-03-04 09:00:00", None, None,
-               1, 1, 0, 0, 1, 1, 0, None),
+               1, 1, 0, 0, 1, 1, 0, None, "ionn", None, 0),
     "U15": row("2024-03-12 06:00:00", 0, "2024-03-12", "2024-03-12 06:05:00", "2024-03-12 07:00:00",
-               "2024-03-12 07:30:00", "2024-03-12 08:00:00", 1, 1, 1, 1, 0, 0, 0, 120),
+               "2024-03-12 07:30:00", "2024-03-12 08:00:00", 1, 1, 1, 1, 0, 0, 0, 120,
+               "oooo", "2024-03-12 07:30:00", 1),
 }
 # U08 after the late batch: KYC gap filled, earlier trade replaces the 12:00 one
 EXPECTED_U08_AFTER_LATE = dict(EXPECTED["U08"], identity_verified_at="2024-03-08 09:00:00",
                                first_trade_at="2024-03-08 11:00:00", has_missing_step=0,
+                               identity_verified_state="observed",
                                minutes_signup_to_first_trade=180)
 
 EXPECTED_QUARANTINE = {("unmatched_ref", "app", "anon-orphan-1", "e-0601"),
+                       ("orphan_link", "app", "anon-u13", "e-1302"),
                        ("unmatched_ref", "ledger", "ledger_account:999", "t-0601"),
                        ("unparseable_ts", "app", U["U12"], "e-1202")}
 EXPECTED_N_SOURCE_EVENTS_U02 = {"signup": 3, "email_verified": 2, "identity_verified": 2, "first_deposit": 2}
@@ -224,7 +236,7 @@ def clean_users():
         # sign-up: via anon id for even users, via (sometimes upper-case) uuid otherwise; alternating offsets
         if i % 2 == 0:
             links.append((f"anon-c{i}", u))
-            ref = f"ANON-C{i}" if i % 4 == 0 else f" anon-c{i} "
+            ref = f"anon-c{i}" if i % 4 == 0 else f" anon-c{i} "     # anon ids: padding only, case is exact
         else:
             ref = u.upper() if i % 3 == 0 else u
         if i % 3 == 0:
@@ -246,7 +258,8 @@ def clean_users():
         at = [s.strftime(FMT) if n < depth else None for n, s in enumerate(steps)]
         expected[u] = row(at[0], 0, at[0][:10], at[1], at[2], at[3], at[4],
                           int(depth >= 2), int(depth >= 3), int(depth >= 4), int(depth >= 5), 0, 0, 0,
-                          200 + i % 120 if depth == 5 else None)
+                          200 + i % 120 if depth == 5 else None,
+                          "".join("o" if n < depth else "n" for n in range(1, 5)), at[3], int(depth >= 4))
     return app, kyc, ledger, accounts, links, expected
 
 

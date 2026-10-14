@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 Result = namedtuple("Result", "name status metric detail")
 ACCEPTED_STEPS = ("signup", "email_verified", "identity_verified", "first_deposit", "first_trade")
+IDENTITY_REASONS = ("unmatched_ref", "ambiguous_link", "orphan_link")
 
 
 def _one(conn, sql, *args):
@@ -44,10 +45,26 @@ def identity_map_unique(conn):
                   f"refs mapping to >1 user={fan}")
 
 
+def ambiguous_links(conn):
+    """Refs linked to >1 user. Their events are quarantined (no fan-out), so this warns rather than errors."""
+    n = _one(conn, "SELECT COUNT(*) FROM int_identity_map WHERE link_status = 'ambiguous_link'")
+    return Result("ambiguous identity links", "warn" if n else "pass", n, f"refs linked to >1 user={n}")
+
+
+def account_uuid_unique(conn):
+    """core.accounts is the system of record: one account_id must map to exactly one user UUID."""
+    n = _one(conn, "SELECT COUNT(*) FROM (SELECT account_id FROM core_accounts GROUP BY account_id "
+                   "HAVING COUNT(DISTINCT LOWER(TRIM(user_uuid))) > 1)")
+    return Result("accounts.account_id -> one user_uuid", "error" if n else "pass", n,
+                  f"account_ids with >1 distinct uuid={n}")
+
+
 def identity_match_rate(conn, warn=0.005, error=0.01):
+    """Share of distinct source refs that do not resolve to exactly one known user (any identity reason)."""
     total = _one(conn, "SELECT COUNT(DISTINCT user_ref) FROM stg_onboarding_events WHERE step IS NOT NULL")
+    ph = ",".join("?" * len(IDENTITY_REASONS))
     unmatched = _one(conn, "SELECT COUNT(DISTINCT user_ref) FROM int_onboarding_quarantine "
-                           "WHERE reason = 'unmatched_ref'")
+                           f"WHERE reason IN ({ph})", *IDENTITY_REASONS)
     rate = unmatched / total if total else 0.0
     status = "error" if rate >= error else "warn" if rate >= warn else "pass"
     return Result("identity match rate", status, rate, f"unmatched refs {unmatched}/{total} = {rate:.2%}")
@@ -114,7 +131,8 @@ def event_conservation(conn):
     """Nothing vanishes: every staged funnel event is either usable by the fact or sits in quarantine."""
     staged = _one(conn, "SELECT COUNT(*) FROM stg_onboarding_events WHERE step IS NOT NULL")
     usable = _one(conn, "SELECT COUNT(*) FROM stg_onboarding_events e JOIN int_identity_map m "
-                        "ON m.user_ref = e.user_ref WHERE e.step IS NOT NULL AND e.event_ts_utc IS NOT NULL")
+                        "ON m.user_ref = e.user_ref AND m.link_status = 'resolved' "
+                        "WHERE e.step IS NOT NULL AND e.event_ts_utc IS NOT NULL")
     quarantined = _one(conn, "SELECT COUNT(*) FROM int_onboarding_quarantine WHERE step IS NOT NULL")
     ok = staged == usable + quarantined
     return Result("event conservation (staged = usable + quarantined)", "pass" if ok else "error",
@@ -123,5 +141,6 @@ def event_conservation(conn):
 
 def run_all(conn, now):
     return [funnel_grain(conn), events_grain(conn), events_accepted_steps(conn), identity_map_unique(conn),
-            identity_match_rate(conn), no_signup_anchor(conn), reconciliation(conn), out_of_order_rate(conn),
+            ambiguous_links(conn), account_uuid_unique(conn), identity_match_rate(conn), no_signup_anchor(conn),
+            reconciliation(conn), out_of_order_rate(conn),
             assumed_tz_jump(conn), freshness(conn, now), timestamp_bounds(conn, now), event_conservation(conn)]

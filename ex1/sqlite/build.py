@@ -7,6 +7,7 @@ import math
 import re
 import sqlite3
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -79,6 +80,17 @@ def to_timestamp_ntz(v):
     return out
 
 
+def try_to_number(v):
+    """TRY_TO_NUMBER(v) with the default NUMBER(38,0): integer (half-up rounding), NULL on anything else.
+    Lets the model read epoch seconds that arrive as numbers OR numeric strings without crashing on garbage."""
+    if v is None:
+        return None
+    try:
+        return int(Decimal(str(v).strip()).to_integral_value(ROUND_HALF_UP))
+    except (InvalidOperation, ValueError, OverflowError):    # 'abc', 'NaN', 'Infinity'
+        return None
+
+
 def convert_timezone(*args):
     """CONVERT_TIMEZONE(target_tz, ts_tz)            -> TIMESTAMP_TZ in target (we return it as NTZ text,
                                                        i.e. the ::TIMESTAMP_NTZ cast in the Snowflake model)
@@ -93,6 +105,9 @@ def convert_timezone(*args):
         source, target, ts = args
         if ts is None or source is None:
             return None
+        # fold=0: a nonexistent wall clock (DST gap) gets the pre-transition offset and an ambiguous one
+        # (DST overlap) the earlier instant. The model does not rely on either choice: it round-trips the
+        # result to detect both cases, because Snowflake's own behaviour here is not verified.
         dt = datetime.fromisoformat(ts).replace(tzinfo=ZoneInfo(source))  # raises on unknown tz, like Snowflake
         return _fmt(dt.astimezone(ZoneInfo(target)).replace(tzinfo=None))
     raise sqlite3.ProgrammingError("convert_timezone takes 2 or 3 arguments")
@@ -113,6 +128,7 @@ def connect(path=":memory:"):
     conn.create_function("try_to_timestamp_tz", 1, try_to_timestamp_tz, deterministic=True)
     conn.create_function("try_to_timestamp_ntz", 1, try_to_timestamp_ntz, deterministic=True)
     conn.create_function("to_timestamp_ntz", 1, to_timestamp_ntz, deterministic=True)
+    conn.create_function("try_to_number", 1, try_to_number, deterministic=True)
     conn.create_function("convert_timezone", -1, convert_timezone, deterministic=True)
     conn.create_function("datediff_minute", 2, datediff_minute, deterministic=True)
     conn.row_factory = sqlite3.Row

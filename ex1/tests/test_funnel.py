@@ -14,8 +14,11 @@ sys.path.insert(0, str(HERE))
 import build            # noqa: E402
 import dq_checks as dq  # noqa: E402
 import fixtures as fx   # noqa: E402
+import fixtures_handcalc as hc  # noqa: E402
 
 SNOWFLAKE_SQL = HERE.parent / "fct_onboarding_funnel.sql"
+SNOWFLAKE_PM_SQL = HERE.parent / "pm_funnel_query.sql"
+SQLITE_PM_SQL = HERE.parent / "sqlite" / "pm_funnel_query.sql"
 
 
 def fresh(with_clean=True):
@@ -54,8 +57,17 @@ class TestUdfSemantics(unittest.TestCase):
 
     def test_epoch_seconds_are_utc(self):
         self.assertEqual(build.to_timestamp_ntz(1709290800), "2024-03-01 11:00:00")
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError):         # TO_ (non-TRY) still fails loudly, like Snowflake ...
             build.to_timestamp_ntz("garbage")
+
+    def test_try_to_number_returns_null_on_garbage(self):
+        # ... which is why the model now reads the KYC epoch via TRY_TO_NUMBER (NULL -> quarantine)
+        self.assertEqual(build.try_to_number(" 1709290800 "), 1709290800)
+        self.assertEqual(build.try_to_number(1709290800), 1709290800)
+        self.assertEqual(build.try_to_number("1.5"), 2)                 # NUMBER(38,0): half-up rounding
+        for bad in ("garbage", "", "NaN", "Infinity", None):
+            self.assertIsNone(build.try_to_number(bad), bad)
+        self.assertIsNone(build.to_timestamp_ntz(build.try_to_number("garbage")))
 
     def test_regexp_like_is_full_match(self):
         pat = ".*(Z|[+-][0-9]{2}:?[0-9]{2})"
@@ -129,26 +141,39 @@ class TestFunnelOutput(unittest.TestCase):
         self.assertEqual(funnel_row(self.conn, fx.U["U14"])["is_out_of_order"], 1)
 
     def test_has_missing_step_equals_bruteforce_definition(self):
-        cols = ["email_verified_at", "identity_verified_at", "first_deposit_at", "first_trade_at"]
+        # Rule change: only the MANDATORY steps (email, KYC) can be missing; a trade no longer implies a
+        # deposit, so "trade without deposit" is not a gap.
         for r in self.conn.execute("SELECT * FROM fct_onboarding_funnel"):
-            vals = [r[c] for c in cols]
-            brute = any(vals[i] is None and any(v is not None for v in vals[i + 1:]) for i in range(len(vals)))
+            email, idv, dep, trade = (r[c] for c in ("email_verified_at", "identity_verified_at",
+                                                       "first_deposit_at", "first_trade_at"))
+            brute = (email is None and any(v is not None for v in (idv, dep, trade))) or \
+                    (idv is None and any(v is not None for v in (dep, trade)))
             self.assertEqual(bool(r["has_missing_step"]), brute, r["user_uuid"])
 
     def test_is_out_of_order_equals_bruteforce_definition(self):
+        # Rule change: deposit and trade share a stage (parallel funding routes), so their relative order is free.
         cols = ["email_verified_at", "identity_verified_at", "first_deposit_at", "first_trade_at"]
+        stage = [1, 2, 3, 4, 4]
         for r in self.conn.execute("SELECT * FROM fct_onboarding_funnel"):
             sig = None if r["signup_event_missing"] else r["signup_at"]   # event-based comparison only
             vals = [sig] + [r[c] for c in cols]
             brute = any(vals[i] is not None and vals[j] is not None and vals[j] < vals[i]
-                        for i in range(5) for j in range(i + 1, 5))
+                        for i in range(5) for j in range(5) if stage[i] < stage[j])
             self.assertEqual(bool(r["is_out_of_order"]), brute, r["user_uuid"])
 
     def test_reached_flags_monotonic(self):
+        # email >= KYC >= funding, funding = deposit OR trade. Deposit vs trade is deliberately NOT ordered.
         bad = self.conn.execute("""SELECT COUNT(*) FROM fct_onboarding_funnel WHERE
-            reached_first_trade > reached_first_deposit OR reached_first_deposit > reached_identity_verified
-            OR reached_identity_verified > reached_email_verified""").fetchone()[0]
+            reached_funding > reached_identity_verified OR reached_identity_verified > reached_email_verified
+            OR reached_funding <> (reached_first_deposit OR reached_first_trade)""").fetchone()[0]
         self.assertEqual(bad, 0)
+
+    def test_at_columns_are_observed_only(self):
+        # *_at is never filled by inference: state 'observed' <=> timestamp present, for every step
+        for step in ("email_verified", "identity_verified", "first_deposit", "first_trade"):
+            bad = self.conn.execute(f"""SELECT COUNT(*) FROM fct_onboarding_funnel
+                WHERE ({step}_state = 'observed') <> ({step}_at IS NOT NULL)""").fetchone()[0]
+            self.assertEqual(bad, 0, step)
 
 
 class TestLateArrivingData(unittest.TestCase):
@@ -181,10 +206,11 @@ class TestDataQualityChecks(unittest.TestCase):
         conn, _ = fresh()
         results = {r.name: r for r in dq.run_all(conn, fx.NOW)}
         for name, r in results.items():
-            expected = "warn" if name == "no_signup_anchor" else "pass"   # U13 is a planted anchorless user
-            self.assertEqual(r.status, expected, f"{name}: {r.detail}")
-        self.assertEqual(results["no_signup_anchor"].metric, 1)
-        self.assertGreater(results["identity match rate"].metric, 0)    # the 2 planted unmatched refs are counted
+            # Rule change: U13 (anon link to a user without an account) used to be a "no_signup_anchor" warn;
+            # its link is now an orphan_link and its event is quarantined, so every check passes.
+            self.assertEqual(r.status, "pass", f"{name}: {r.detail}")
+        self.assertEqual(results["no_signup_anchor"].metric, 0)
+        self.assertGreater(results["identity match rate"].metric, 0)    # the 3 planted identity failures count
         self.assertGreater(results["is_out_of_order rate"].metric, 0)
 
     def inject(self, **rows):
@@ -193,11 +219,41 @@ class TestDataQualityChecks(unittest.TestCase):
         build.build_model(conn)
         return conn
 
-    def test_fanout_anon_link_detected(self):
+    def test_ambiguous_anon_link_quarantined_not_fanned_out(self):
+        # Rule change: an anon id linked to two users used to fan out (and fail the uniqueness check);
+        # now the ref is marked ambiguous_link, its events are quarantined and nothing is double counted.
         conn = self.inject(links=[("anon-u01", fx.U["U02"])])     # same anon id linked to a second user
         s = self.status(conn)
-        self.assertEqual(s["identity_map.user_ref unique (no fan-out)"], "error")
-        self.assertEqual(s["event conservation (staged = usable + quarantined)"], "error")
+        self.assertEqual(s["ambiguous identity links"], "warn")
+        self.assertEqual(s["identity_map.user_ref unique (no fan-out)"], "pass")
+        self.assertEqual(s["event conservation (staged = usable + quarantined)"], "pass")
+        self.assertIn(("ambiguous_link", "e-0101"), {tuple(r) for r in conn.execute(
+            "SELECT reason, source_event_id FROM int_onboarding_quarantine")})
+        self.assertEqual(funnel_row(conn, fx.U["U01"])["signup_event_missing"], 1)
+        self.assertEqual(funnel_row(conn, fx.U["U02"])["signup_at"], fx.EXPECTED["U02"]["signup_at"])
+
+    def test_identity_map_fanout_check_still_fires(self):
+        conn, _ = fresh(with_clean=False)
+        conn.execute("CREATE TABLE m AS SELECT * FROM int_identity_map")
+        conn.execute("INSERT INTO m SELECT user_ref, link_status, 'someone-else', 1 FROM m LIMIT 1")
+        for view in ("int_onboarding_quarantine", "fct_onboarding_events", "int_identity_map"):   # dependants
+            conn.execute(f"DROP VIEW {view}")
+        conn.execute("ALTER TABLE m RENAME TO int_identity_map")
+        self.assertEqual(dq.identity_map_unique(conn).status, "error")
+
+    def test_account_with_two_uuids_detected_and_ledger_quarantined(self):
+        conn = self.inject(accounts=[(101, fx.U["U02"], "2024-03-01 09:59:00")])   # account 101 is U01's
+        self.assertEqual(dq.account_uuid_unique(conn).status, "error")
+        reasons = {r[0] for r in conn.execute("SELECT reason FROM int_onboarding_quarantine "
+                                              "WHERE user_ref = 'ledger_account:101'")}
+        self.assertEqual(reasons, {"ambiguous_link"})
+        self.assertIsNone(funnel_row(conn, fx.U["U01"])["first_deposit_at"])     # not credited to anyone
+        self.assertEqual(funnel_row(conn, fx.U["U02"])["first_deposit_at"], fx.EXPECTED["U02"]["first_deposit_at"])
+
+    def test_no_signup_anchor_detected(self):
+        conn = self.inject(accounts=[(70_000, "n0000000", None)],
+                           app=[("n-1", "n0000000", "email_confirmed", "2024-03-06T09:00:00Z", fx.LOAD_1)])
+        self.assertEqual(dq.no_signup_anchor(conn).status, "warn")
 
     def test_duplicate_funnel_row_detected(self):
         conn, _ = fresh()
@@ -216,7 +272,7 @@ class TestDataQualityChecks(unittest.TestCase):
         self.assertEqual(dq.events_accepted_steps(conn).status, "error")
 
     def test_match_rate_thresholds(self):
-        # baseline: 2 unmatched of 578 distinct refs = 0.35% (pass); +1 -> 0.52% (warn); +5 -> 1.2% (error)
+        # baseline: 3 unresolved of 745 distinct refs = 0.40% (pass); +1 -> 0.54% (warn); +5 -> 1.07% (error)
         few = [(f"x-{i}", f"anon-lost-{i}", "sign_up", "2024-03-06T09:00:00Z", fx.LOAD_1) for i in range(1)]
         many = [(f"y-{i}", f"anon-gone-{i}", "sign_up", "2024-03-06T09:00:00Z", fx.LOAD_1) for i in range(5)]
         self.assertEqual(dq.identity_match_rate(self.inject(app=few)).status, "warn")
@@ -256,7 +312,7 @@ class TestSnowflakeSqliteParity(unittest.TestCase):
 
     def test_same_output_columns(self):
         text = SNOWFLAKE_SQL.read_text()
-        final = text.split("CREATE OR REPLACE TABLE analytics.fct_onboarding_funnel")[1].split("FROM spine")[0]
+        final = text.split("CREATE OR REPLACE TABLE analytics.fct_onboarding_funnel")[1].split("\nFROM states")[0]
         final = re.sub(r"--[^\n]*", "", final.split("\nSELECT\n")[-1])
         items, depth, cur = [], 0, ""
         for ch in final:                       # split the select list on top-level commas
@@ -278,34 +334,164 @@ class TestSnowflakeSqliteParity(unittest.TestCase):
             self.assertIn(f"analytics.{obj} AS", text)
 
 
+# ------------------------------------------------------------------------------------------------------
+# Hand-calculated mini fixture (fixtures_handcalc.py): every expected value is a literal worked out by hand.
+# ------------------------------------------------------------------------------------------------------
+def build_handcalc(late=True, **overrides):
+    conn = build.connect()
+    build.create_raw_tables(conn)
+    hc.load(conn, late=late, **overrides)
+    build.build_model(conn)
+    return conn
+
+
+def pm_result(conn, now=hc.NOW):
+    return [tuple(r) for r in conn.execute(SQLITE_PM_SQL.read_text(), {"now": now})]
+
+
+def hc_row(conn, name):
+    r = conn.execute("SELECT * FROM fct_onboarding_funnel WHERE user_uuid = ?", (hc.H[name],)).fetchone()
+    return None if r is None else tuple(r[c] for c in hc.FUNNEL_COLS)
+
+
+def funnel_snapshot(conn):
+    """All funnel rows, minus _loaded_at (the only column allowed to differ between builds)."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(fct_onboarding_funnel)") if r[1] != "_loaded_at"]
+    return [tuple(r) for r in conn.execute(f"SELECT {', '.join(cols)} FROM fct_onboarding_funnel "
+                                           "ORDER BY user_uuid")]
+
+
+class TestHandCalculated(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.conn = build_handcalc()
+
+    def test_pm_query_hand_calculated(self):
+        self.assertEqual(pm_result(self.conn), hc.EXPECTED_PM)
+
+    def test_every_user_hand_calculated(self):
+        for name, exp in hc.EXPECTED_FUNNEL.items():
+            with self.subTest(user=name):
+                self.assertEqual(hc_row(self.conn, name), exp)
+        n = self.conn.execute("SELECT COUNT(*) FROM fct_onboarding_funnel").fetchone()[0]
+        self.assertEqual(n, 21)
+
+    def test_quarantine_hand_calculated(self):
+        got = {tuple(r) for r in self.conn.execute(
+            "SELECT reason, source, user_ref, source_event_id FROM int_onboarding_quarantine")}
+        self.assertEqual(got, hc.EXPECTED_QUARANTINE)
+
+    def test_deposit_after_day7_but_trade_on_day2_counts_as_funding(self):
+        # H01 alone in a cohort: COALESCE(deposit, trade) would say "no deposit in 7d" AND "no funding"
+        conn = build_handcalc(late=False, **hc.only("H01"))
+        self.assertEqual(pm_result(conn), [("2024-03-04", 1, 0, 1, 1)])
+
+    def test_window_boundaries(self):
+        # H04: trade at signup + 7d - 1s is counted, deposit at exactly signup + 7d is not
+        conn = build_handcalc(late=False, **hc.only("H04"))
+        self.assertEqual(pm_result(conn), [("2024-03-04", 1, 0, 1, 1)])
+
+    def test_trade_before_signup_not_counted(self):
+        conn = build_handcalc(late=False, **hc.only("H03"))
+        self.assertEqual(pm_result(conn), [("2024-03-04", 1, 0, 0, 0)])
+
+    def test_maturity_boundary(self):
+        # week C (2024-11-04) needs now >= 2024-11-18 00:00:00; one second earlier it is not reported
+        self.assertEqual([r[0] for r in pm_result(self.conn, "2024-11-17 23:59:59")], ["2024-03-04", "2024-10-28"])
+        self.assertEqual([r[0] for r in pm_result(self.conn, "2024-11-25 00:00:00")][-1], "2024-11-11")
+
+    def test_repeated_signup_and_multiple_device_ids(self):
+        rows = {(r["user_uuid"], r["step"]): r["n_source_events"] for r in self.conn.execute(
+            "SELECT user_uuid, step, n_source_events FROM fct_onboarding_events")}
+        self.assertEqual(rows[(hc.H["H06"], "signup")], 3)            # replay + retry, first one wins
+        self.assertEqual(rows[(hc.H["H08"], "email_verified")], 2)    # phone + web ids, same user
+        self.assertEqual(rows[(hc.H["H08"], "signup")], 1)            # via the third id, ' anon-H08 '
+
+    def test_anon_ids_differing_only_by_case_not_merged(self):
+        m = {r[0]: (r[1], r[2]) for r in self.conn.execute(
+            "SELECT user_ref, link_status, user_uuid FROM int_identity_map WHERE user_ref LIKE 'anon-%ase'")}
+        self.assertEqual(m, {"anon-Case": ("resolved", hc.H["H09"]), "anon-case": ("resolved", hc.H["H10"])})
+
+    def test_dst_gap_and_overlap(self):
+        # gap: 02:30 does not exist in New York on 2024-03-10 -> NULL + quarantined, never shifted to 07:30
+        # overlap: 01:30 happens twice on 2024-11-03 -> earlier instant (EDT, 05:30 UTC) and flagged
+        got = {r[0]: (r[1], r[2], r[3]) for r in self.conn.execute(
+            "SELECT source_event_id, event_ts_utc, ts_dst_ambiguous, ts_null_reason FROM stg_onboarding_events "
+            "WHERE source_event_id IN ('ht-1101', 'ht-1102', 'ht-1601', 'ht-0101')")}
+        self.assertEqual(got, {"ht-1101": (None, 0, "nonexistent_local_time"),
+                               "ht-1102": ("2024-03-10 07:30:00", 0, None),
+                               "ht-1601": ("2024-11-03 05:30:00", 1, None),
+                               "ht-0101": ("2024-03-06 10:00:00", 0, None)})
+
+    def test_late_arriving_event(self):
+        conn = build_handcalc(late=False)
+        self.assertEqual(hc_row(conn, "H12"), hc.EXPECTED_H12_BEFORE_LATE)
+        self.assertEqual(pm_result(conn), hc.EXPECTED_PM_BEFORE_LATE)
+        hc.load(conn, late=False, app=[], kyc=[], ledger=hc.LATE_LEDGER, accounts=[], links=[])
+        build.build_model(conn)
+        self.assertEqual(hc_row(conn, "H12"), hc.EXPECTED_FUNNEL["H12"])
+        self.assertEqual(pm_result(conn), hc.EXPECTED_PM)
+
+    def test_bad_kyc_epoch_quarantined_not_fatal(self):
+        # used to raise inside TO_TIMESTAMP_NTZ and abort the whole build
+        self.assertEqual(hc_row(self.conn, "H21")[3], "rejected_event")
+
+
+class TestMetamorphic(unittest.TestCase):
+    """Changes that must NOT move the funnel rows or the PM query result."""
+
+    @classmethod
+    def setUpClass(cls):
+        base = build_handcalc()
+        cls.funnel, cls.pm = funnel_snapshot(base), pm_result(base)
+
+    def assertUnchanged(self, conn):
+        self.assertEqual(pm_result(conn), self.pm)
+        self.assertEqual(funnel_snapshot(conn), self.funnel)
+
+    def test_duplicating_events(self):
+        self.assertUnchanged(build_handcalc(app=hc.APP + hc.APP[:5], kyc=hc.KYC + hc.KYC[:3],
+                                            ledger=hc.LEDGER + hc.LEDGER[:4]))
+
+    def test_adding_another_device_link(self):
+        self.assertUnchanged(build_handcalc(links=hc.ANON_LINKS + [("dev-H08-tablet", hc.H["H08"]),
+                                                                   ("dev-H05-tv", hc.H["H05"])]))
+
+    def test_reordering_inserted_rows(self):
+        self.assertUnchanged(build_handcalc(app=hc.APP[::-1], kyc=hc.KYC[::-1], ledger=hc.LEDGER[::-1],
+                                            accounts=hc.ACCOUNTS[::-1], links=hc.ANON_LINKS[::-1]))
+
+    def test_rebuilding_twice(self):
+        conn = build_handcalc()
+        build.build_model(conn)
+        build.build_model(conn)
+        self.assertUnchanged(conn)
+
+    def test_late_event_outside_window(self):
+        # a later trade for H01 on day 20: neither its first trade nor its 7-day window changes
+        late = [("ht-0199", 201, "trade", "completed", "2024-03-24 10:00:00", "UTC", hc.LOAD_LATE)]
+        self.assertUnchanged(build_handcalc(ledger=hc.LEDGER + late))
+
+    def test_late_first_event_outside_window_keeps_pm_result(self):
+        # H05's FIRST deposit on day 10 changes its funnel row, but not the 7-day PM numbers
+        late = [("ht-0599", 205, "deposit", "completed", "2024-03-17 08:00:00", "UTC", hc.LOAD_LATE)]
+        self.assertEqual(pm_result(build_handcalc(ledger=hc.LEDGER + late)), self.pm)
+
+
+class TestPmQueryParity(unittest.TestCase):
+    def test_same_output_columns_and_definitions(self):
+        conn = build_handcalc()
+        cur = conn.execute(SQLITE_PM_SQL.read_text(), {"now": hc.NOW})
+        cols = [d[0] for d in cur.description]
+        self.assertEqual(cols, ["cohort_week", "signups", "observed_deposit_7d", "funding_7d", "trade_7d"])
+        sf = SNOWFLAKE_PM_SQL.read_text()
+        for c in cols:
+            self.assertRegex(sf, rf"AS {c}\b")
+        for fragment in ("DATEADD('day', 1 - DAYOFWEEKISO(signup_at), DATE(signup_at))", "SYSDATE()",
+                         "DATEADD('day', 14, cohort_week", "COUNT_IF(deposit_in_7d OR trade_in_7d)"):
+            self.assertIn(fragment, sf)
+        self.assertNotIn("CURRENT_TIMESTAMP()", sf.split("\nWITH ")[1])     # code, not the header comment
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
-
-class TestPmFunnelQuery(unittest.TestCase):
-    """The example PM query in submission.md must agree with an independent Python computation."""
-
-    def test_query_matches_python(self):
-        from collections import defaultdict
-        from datetime import datetime, timedelta
-        conn, _ = fresh()
-        sql = (HERE.parent / "sqlite" / "pm_funnel_query.sql").read_text()
-        got = {r[0]: (r[1], round(r[2], 6), round(r[3], 6))
-               for r in conn.execute(sql, {"now": fx.NOW}).fetchall()}
-
-        def ts(v):
-            return None if v is None else datetime.fromisoformat(str(v))
-        now = ts(fx.NOW)
-        cohorts = defaultdict(list)
-        for signup, dep, trade in conn.execute(  # a trade with no deposit event still counts as deposited
-                "SELECT signup_at, first_deposit_at, first_trade_at FROM fct_onboarding_funnel"):
-            s = ts(signup)
-            if s >= now - timedelta(days=7):
-                continue                                          # immature cohort
-            week = (s - timedelta(days=s.weekday())).date().isoformat()
-            in7 = lambda t: t is not None and ts(t) < s + timedelta(days=7)
-            cohorts[week].append((in7(dep if dep is not None else trade), in7(trade)))
-        want = {w: (len(v), round(sum(d for d, _ in v) / len(v), 6), round(sum(t for _, t in v) / len(v), 6))
-                for w, v in cohorts.items()}
-        self.assertTrue(want, "fixture should contain mature cohorts")
-        self.assertEqual(got, want)

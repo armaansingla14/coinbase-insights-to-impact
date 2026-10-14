@@ -1,27 +1,32 @@
 """Generate synthetic signup extracts for Systems A, B, C with known, planted discrepancies.
 
 Report day: 2026-09-24. Planted truth:
-  * 50,000 real accounts created on the UTC day; 12,000 of them before 07:00 UTC.
-  * 2,000 internal/test accounts (@coinbase-test.com) created the same UTC day.
+  * 50,000 real accounts created on the UTC day; 12,000 of them before 07:00 UTC (2026-09-23 in
+    Pacific time). Those 12,000 verify at a 90% rate, so ~1,207 of them are also unverified (not
+    a fixed plant: the count comes from the seeded RNG; tests recount it from the CSV).
+  * 2,000 internal/test accounts (@coinbase-test.com) spread over the same UTC day (~600 pre-07:00).
   * 12,500 real accounts created 2026-09-25 00:00-07:00 UTC (still 2026-09-24 in Pacific time).
   * 5,500 of the post-07:00 real users never verified email.
 
 System A: account-created table, UTC day, includes test accounts           -> 52,000 rows
 System B: "verified signups", Pacific-time day, excludes test, IDs uppercased, naive local ts -> 45,000 rows
-System C: event stream, UTC day, includes test, one ingest batch replayed  -> 57,000 rows (52,000 distinct)
+System C: event stream, UTC day, includes test                              -> 57,000 rows (52,000 distinct)
+          4,000 rows from the 13:00-16:00 UTC batches re-ingested as <batch>_retry, and 1,000 of
+          those again as <batch>_retry2 -> 5,000 extra rows; every copy has the same timestamp.
 """
 import csv
 import random
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo  # needs the IANA tz database (pip install tzdata on bare Windows)
 
 random.seed(42)
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "data"  # optional output dir (used by tests)
 OUT.mkdir(parents=True, exist_ok=True)
 
 DAY = datetime(2026, 9, 24, tzinfo=timezone.utc)
-PT_OFFSET = timedelta(hours=-7)  # PDT in September
+PT = ZoneInfo("America/Los_Angeles")  # PDT (UTC-7) on the report day; no hardcoded offset
 COUNTRIES = ["US", "GB", "CA", "DE", "FR", "BR", "IN", "SG"]
 PLATFORMS = ["ios", "android", "web"]
 
@@ -53,8 +58,8 @@ add(2_000, 0, 24, is_test=True, verified=True)           # internal / QA account
 add(12_500, 0, 7, base=DAY + timedelta(days=1), verified=True)  # next UTC day, still PT day
 
 utc_day = [u for u in users if DAY <= u["ts"] < DAY + timedelta(days=1)]
-pt_start = DAY - PT_OFFSET  # 2026-09-24 00:00 PT == 07:00 UTC
-pt_day = [u for u in users if pt_start <= u["ts"] < pt_start + timedelta(days=1)]
+pt_start, pt_end = (datetime(2026, 9, d, tzinfo=PT) for d in (24, 25))  # 07:00 UTC -> 07:00 UTC
+pt_day = [u for u in users if pt_start <= u["ts"] < pt_end]
 
 # System A: users table extract (ISO-8601 UTC strings)
 with open(OUT / "system_a.csv", "w", newline="") as f:
@@ -70,7 +75,7 @@ with open(OUT / "system_b.csv", "w", newline="") as f:
     w.writerow(["USER_ID", "signup_ts_local", "country"])
     for u in pt_day:
         if u["verified"] and not u["is_test"]:
-            w.writerow([u["id"].upper(), (u["ts"] + PT_OFFSET).strftime("%Y-%m-%d %H:%M:%S"), u["country"]])
+            w.writerow([u["id"].upper(), u["ts"].astimezone(PT).strftime("%Y-%m-%d %H:%M:%S"), u["country"]])
 
 # System C: event stream (epoch millis); one ingest batch replayed -> duplicate rows
 rows = []
