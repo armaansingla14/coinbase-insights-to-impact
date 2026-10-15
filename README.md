@@ -25,7 +25,7 @@ bash run_all_tests.sh          # every suite; exits non-zero on any failure
 
 | Suite | Command | Tests |
 |---|---|---|
-| Ex1 funnel model (SQLite port) | `python3 -m unittest discover -s ex1/tests` | 57 |
+| Ex1 funnel model (SQLite port) | `python3 -m unittest discover -s ex1/tests` | 58 |
 | Ex1 build + data-quality checks | `python3 ex1/sqlite/build.py` | prints results |
 | Ex2 generate data (run before the end-to-end run) | `python3 ex2/make_fake_data.py` | fixed seed |
 | Ex2 reconciliation | `python3 -m unittest discover -s ex2` | 28 |
@@ -33,7 +33,7 @@ bash run_all_tests.sh          # every suite; exits non-zero on any failure
 | Ex3 + Ex4 pipeline | `python3 -m unittest ex3/test_pipeline.py` | 39 |
 | Word count | `python3 wordcount.py submission.md` | fails above 1,500 |
 
-Last full run: 124 tests, all passing.
+Last full run: 125 tests, all passing.
 
 ## Layout
 

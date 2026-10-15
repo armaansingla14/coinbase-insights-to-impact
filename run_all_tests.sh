@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 fail=0
 run() { echo; echo "=== $1 ==="; shift; "$@" || { echo "FAILED: $*"; fail=1; }; }
 
-run "Ex1: onboarding funnel model (SQLite port, 57 tests)" python3 -m unittest discover -s ex1/tests
+run "Ex1: onboarding funnel model (SQLite port, 58 tests)" python3 -m unittest discover -s ex1/tests
 run "Ex1: build model on fixtures + data-quality checks"  python3 ex1/sqlite/build.py
 run "Ex2: generate synthetic CSVs (seeded, deterministic)" python3 ex2/make_fake_data.py
 run "Ex2: signup reconciliation (28 tests)"               python3 -m unittest discover -s ex2

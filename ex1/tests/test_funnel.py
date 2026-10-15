@@ -47,6 +47,29 @@ class TestUdfSemantics(unittest.TestCase):
         self.assertIsNone(build.try_to_timestamp_tz("not-a-date"))
         self.assertIsNone(build.try_to_timestamp_ntz(None))
 
+    def test_app_offset_normalization_in_staging(self):
+        # Runs the real stg_onboarding_events view. Compact offsets are rewritten to +HH:MM before
+        # parsing (the Snowflake model does the same with '\\1'); offset-free strings are assumed UTC
+        # and flagged; garbage parses to NULL (-> quarantine). Expected values worked out by hand.
+        conn = build.connect()
+        build.create_raw_tables(conn)
+        cases = {"o1": "2024-03-11T05:30:00+0530", "o2": "2024-03-11T05:30:00+05:30",
+                 "o3": "2024-03-10T22:00:00-0400", "o4": "2024-03-11T02:00:00Z",
+                 "o5": "2024-03-11 02:00:00", "o6": "not-a-date", "o7": "2024-03-11T09:15:00+1245"}
+        conn.executemany("INSERT INTO raw_app_events VALUES (?, 'anon-x', 'sign_up', ?, '2024-03-12 00:00:00')",
+                         list(cases.items()))
+        build.build_model(conn)
+        got = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT source_event_id, event_ts_utc, ts_was_assumed_utc FROM stg_onboarding_events")}
+        self.assertEqual(got, {"o1": ("2024-03-11 00:00:00", 0), "o2": ("2024-03-11 00:00:00", 0),
+                               "o3": ("2024-03-11 02:00:00", 0), "o4": ("2024-03-11 02:00:00", 0),
+                               "o5": ("2024-03-11 02:00:00", 1), "o6": (None, 1),
+                               "o7": ("2024-03-10 20:30:00", 0)})
+        self.assertEqual(build.regexp_replace("2024-03-11T05:30:00+0530", "([+-][0-9]{2})([0-9]{2})$",
+                                              r"\1:\2"), "2024-03-11T05:30:00+05:30")
+        self.assertEqual(build.regexp_replace("2024-03-11 02:00:00", "([+-][0-9]{2})([0-9]{2})$",
+                                              r"\1:\2"), "2024-03-11 02:00:00")  # no offset: untouched
+
     def test_convert_timezone_arg_order_and_dst(self):
         # CONVERT_TIMEZONE(source_tz, target_tz, ntz): 07:30 New York wall clock in winter = 12:30 UTC ...
         self.assertEqual(build.convert_timezone("America/New_York", "UTC", "2024-03-01 07:30:00"), "2024-03-01 12:30:00")

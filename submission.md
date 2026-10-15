@@ -1,6 +1,6 @@
 # Coinbase SEA: Insights to Impact Challenge
 
-**Armaan Singla** · ~1,395 words (headings, tables and AI disclosure included; code excluded)
+**Armaan Singla** · ~1,380 words (headings, tables and AI disclosure included; code excluded)
 
 **Note:** fictional scenarios, synthetic data; SQL written for Snowflake but run only through a SQLite port. Code and tests: [github.com/armaansingla14/coinbase-insights-to-impact](https://github.com/armaansingla14/coinbase-insights-to-impact).
 
@@ -27,7 +27,7 @@
 - `rejected_event`: an event existed but failed parsing (instrumentation, not behavior).
 - `not_reached`: no evidence.
 
-A trade does **not** imply a deposit (card buys are a real alternate route), so funding = deposit *or* trade. Out-of-order events keep real timestamps and are flagged; late events rebuild affected users idempotently. A DST local time that doesn't exist is quarantined; a repeated hour takes the earlier instant, flagged.
+I model deposits and trades as separate funding routes (product to confirm), so funding = deposit *or* trade. Out-of-order events keep real timestamps and are flagged; late events rebuild affected users idempotently. A DST local time that doesn't exist is quarantined; a repeated hour takes the earlier instant, flagged.
 
 Step states show where users stop; for 7-day funding, the PM runs:
 
@@ -36,17 +36,18 @@ Step states show where users stop; for 7-day funding, the PM runs:
 WITH users AS (
     SELECT
         DATEADD('day', 1 - DAYOFWEEKISO(signup_at), DATE(signup_at))  AS cohort_week,
-        COALESCE(first_deposit_after_signup_at                  -- >= signup_at by construction
+        COALESCE(first_deposit_after_signup_at  -- >= effective signup anchor by construction
                  < DATEADD('day', 7, signup_at), FALSE)                AS deposit_in_7d,
         COALESCE(first_trade_after_signup_at
                  < DATEADD('day', 7, signup_at), FALSE)                AS trade_in_7d
     FROM analytics.fct_onboarding_funnel
 )
 SELECT cohort_week,
-       COUNT(*)                                AS signups,
-       COUNT_IF(deposit_in_7d)                 AS observed_deposit_7d,
-       COUNT_IF(deposit_in_7d OR trade_in_7d)  AS funding_7d,
-       COUNT_IF(trade_in_7d)                   AS trade_7d
+       COUNT(*)                                             AS signups,
+       -- COUNT_IF returns NULL when no row matches, so default each count to 0
+       COALESCE(COUNT_IF(deposit_in_7d), 0)                 AS observed_deposit_7d,
+       COALESCE(COUNT_IF(deposit_in_7d OR trade_in_7d), 0)  AS funding_7d,
+       COALESCE(COUNT_IF(trade_in_7d), 0)                   AS trade_7d
 FROM users
 WHERE DATEADD('day', 14, cohort_week::TIMESTAMP_NTZ) <= SYSDATE()      -- mature weeks only
 GROUP BY cohort_week
@@ -57,7 +58,7 @@ Window: `[signup, signup + 7 days)`, on the earliest deposit or trade *at or aft
 
 **Checks:** unique grain; ≥ 99% identity match (staged = used + quarantined); one UUID per `account_id`; sign-ups within 0.5% of accounts daily; timestamp sanity; freshness under 6h; out-of-order and assumed-UTC alerts.
 
-**Tested** with 57 SQLite tests, including hand-calculated edge cases (day-2 trade with day-8 deposit, trades before sign-up, the exact day-7 boundary) and metamorphic tests.
+**Tested** with 58 SQLite tests, including hand-calculated edge cases (day-2 trade with day-8 deposit, trades before sign-up, the exact day-7 boundary) and metamorphic tests.
 
 ---
 
@@ -164,11 +165,11 @@ At AMD, working with existing security-notice workflows taught me to trace input
 
 ## Exercise 4: Your Number Is "Wrong"
 
-**First, what are we counting?** The brief says the legacy 41% "double-counts users who trade on multiple devices," a device-grain issue akin to Exercise 3's join. I'd confirm by deduplicating the numerator to users. If that reproduces 34%, the stated cause accounts for the gap; if not, I check the residual:
+**First, what are we counting?** The brief says the legacy 41% "double-counts users who trade on multiple devices," so its numerator counts user-devices while my 34% counts each trader once. That differs from Exercise 3's join, which repeats trades. Before the review I'd still check nothing else differs:
 
 | Hypothesis | Test | Supported if |
 |---|---|---|
-| Device-level numerator | Rows per user | They explain the gap |
+| Device-level numerator (given) | Rows per user | Deduplicating gives 34% |
 | Attempted vs. completed trades | Recompute with each status set | Gap closes on completed only |
 | Denominator eligibility (KYC, test, bots) | Diff the two WAU lists | Denominators differ |
 | Week window or timezone | Align boundaries | Gap closes |
@@ -179,7 +180,7 @@ At AMD, working with existing security-notice workflows taught me to trace input
 
 > "Can we talk before the review? I get why a discrepancy in the deck is stressful, and I'm not trying to make your job harder. The dashboard counts some traders once per device; mine counts each person once. My worry is leadership making a call on a number we think might be off, because once it's in a report people build on it. Making my table match wouldn't make either number right. I'd rather we explain the difference now than explain later why we used it."
 
-**For Friday:** if Thursday's check lands at 34%, headline 34% with 41% footnoted as "legacy, double-counts multi-device traders." If a residual remains, show both, clearly labeled, with the gap under review. The PM presents; I don't correct them in the room. If pressed to present a number I know is wrong, I'd raise it with my manager.
+**For Friday:** headline 34% with 41% footnoted as "legacy, double-counts multi-device traders." If the checks find another difference, the footnote names it too. The PM presents; I don't correct them in the room. If pressed to present a number I know is wrong, I'd raise it with my manager.
 
 **After the review:** one owned definition in the semantic layer (numerator, denominator, grain, filters, timezone), two cycles in parallel, a review of past decisions near thresholds, restated history with a changelog, and a grain test.
 

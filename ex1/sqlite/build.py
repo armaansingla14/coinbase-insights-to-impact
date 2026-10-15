@@ -47,6 +47,13 @@ def regexp_like(subject, pattern):
     return int(re.fullmatch(pattern, subject) is not None)
 
 
+def regexp_replace(subject, pattern, replacement):
+    """REGEXP_REPLACE with \\N backreferences (Snowflake's form once its string literal is unescaped)."""
+    if subject is None or pattern is None or replacement is None:
+        return None
+    return re.sub(pattern, replacement, subject)
+
+
 def try_to_timestamp_tz(s):
     """TRY_TO_TIMESTAMP_TZ: returns an offset-aware ISO string, NULL on failure.
     Offset-less input would take the session TZ in Snowflake; the model never relies on that (it routes
@@ -125,6 +132,7 @@ def datediff_minute(a, b):
 def connect(path=":memory:"):
     conn = sqlite3.connect(path)
     conn.create_function("regexp_like", 2, regexp_like, deterministic=True)
+    conn.create_function("regexp_replace", 3, regexp_replace, deterministic=True)
     conn.create_function("try_to_timestamp_tz", 1, try_to_timestamp_tz, deterministic=True)
     conn.create_function("try_to_timestamp_ntz", 1, try_to_timestamp_ntz, deterministic=True)
     conn.create_function("to_timestamp_ntz", 1, to_timestamp_ntz, deterministic=True)

@@ -24,17 +24,18 @@
 WITH users AS (
     SELECT
         DATEADD('day', 1 - DAYOFWEEKISO(signup_at), DATE(signup_at))  AS cohort_week,
-        COALESCE(first_deposit_after_signup_at                  -- >= signup_at by construction
+        COALESCE(first_deposit_after_signup_at  -- >= effective signup anchor by construction
                  < DATEADD('day', 7, signup_at), FALSE)                AS deposit_in_7d,
         COALESCE(first_trade_after_signup_at
                  < DATEADD('day', 7, signup_at), FALSE)                AS trade_in_7d
     FROM analytics.fct_onboarding_funnel
 )
 SELECT cohort_week,
-       COUNT(*)                                AS signups,
-       COUNT_IF(deposit_in_7d)                 AS observed_deposit_7d,
-       COUNT_IF(deposit_in_7d OR trade_in_7d)  AS funding_7d,
-       COUNT_IF(trade_in_7d)                   AS trade_7d
+       COUNT(*)                                             AS signups,
+       -- COUNT_IF returns NULL when no row matches, so default each count to 0
+       COALESCE(COUNT_IF(deposit_in_7d), 0)                 AS observed_deposit_7d,
+       COALESCE(COUNT_IF(deposit_in_7d OR trade_in_7d), 0)  AS funding_7d,
+       COALESCE(COUNT_IF(trade_in_7d), 0)                   AS trade_7d
 FROM users
 WHERE DATEADD('day', 14, cohort_week::TIMESTAMP_NTZ) <= SYSDATE()      -- mature weeks only
 GROUP BY cohort_week

@@ -36,7 +36,9 @@
 --      as 'nonexistent_local_time'; a time that exists twice (fall-back overlap) resolves to the EARLIER
 --      instant and is flagged ts_dst_ambiguous. Both are detected by round-tripping through
 --      CONVERT_TIMEZONE, so the result does not depend on which instant Snowflake picks (UNVERIFIED);
---      the round-trip assumes 1-hour DST shifts (true for the zones in scope).
+--      the round-trip assumes 1-hour DST shifts (true for the zones in scope; e.g. Lord Howe's 30-minute
+--      shift is out of scope). An invalid tz_name most likely makes CONVERT_TIMEZONE raise and fail the
+--      build rather than quarantine the row (UNVERIFIED; guard with an accepted-values test on tz_name).
 
 ------------------------------------------------------------------------
 -- 1. STAGING: one CTE per source, same output contract
@@ -50,7 +52,10 @@ WITH stg_app AS (
         CASE event_name WHEN 'sign_up'         THEN 'signup'
                         WHEN 'email_confirmed' THEN 'email_verified' END AS step,
         IFF(REGEXP_LIKE(TRIM(ts_raw), '.*(Z|[+-][0-9]{2}:?[0-9]{2})'),
-            CONVERT_TIMEZONE('UTC', TRY_TO_TIMESTAMP_TZ(TRIM(ts_raw)))::TIMESTAMP_NTZ,  -- honour the offset
+            -- '+0530' -> '+05:30': AUTO detection documents TZHTZM only after a space, so normalize a
+            -- trailing compact offset first. '\\1' is the backreference inside a SQL string literal.
+            CONVERT_TIMEZONE('UTC', TRY_TO_TIMESTAMP_TZ(
+                REGEXP_REPLACE(TRIM(ts_raw), '([+-][0-9]{2})([0-9]{2})$', '\\1:\\2')))::TIMESTAMP_NTZ,  -- honour the offset
             TRY_TO_TIMESTAMP_NTZ(TRIM(ts_raw)))                 AS event_ts_utc,        -- no offset: assume UTC, explicitly
         NOT REGEXP_LIKE(TRIM(ts_raw), '.*(Z|[+-][0-9]{2}:?[0-9]{2})') AS ts_was_assumed_utc,
         FALSE                                                   AS ts_dst_ambiguous,

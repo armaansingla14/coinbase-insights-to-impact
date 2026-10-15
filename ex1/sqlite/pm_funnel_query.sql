@@ -6,7 +6,7 @@ WITH users AS (
     SELECT
         date(signup_at, '-' || ((CAST(strftime('%w', signup_at) AS INTEGER) + 6) % 7) || ' days')
                                                                                     AS cohort_week,
-        COALESCE(first_deposit_after_signup_at                  -- >= signup_at by construction
+        COALESCE(first_deposit_after_signup_at  -- >= effective signup anchor by construction
                  < datetime(signup_at, '+7 days'), 0)                  AS deposit_in_7d,
         COALESCE(first_trade_after_signup_at
                  < datetime(signup_at, '+7 days'), 0)                  AS trade_in_7d
@@ -16,7 +16,7 @@ SELECT cohort_week,
        COUNT(*)                                AS signups,
        SUM(deposit_in_7d)                      AS observed_deposit_7d,
        SUM(deposit_in_7d OR trade_in_7d)       AS funding_7d,
-       SUM(trade_in_7d)                        AS trade_7d
+       SUM(trade_in_7d)                        AS trade_7d   -- SUM of 0/1: 0, not NULL
 FROM users
 WHERE datetime(cohort_week, '+14 days') <= :now                                     -- mature weeks only
 GROUP BY cohort_week

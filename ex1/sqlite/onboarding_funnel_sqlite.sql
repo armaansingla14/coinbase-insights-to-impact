@@ -27,7 +27,10 @@ WITH stg_app AS (
         CASE event_name WHEN 'sign_up'         THEN 'signup'
                         WHEN 'email_confirmed' THEN 'email_verified' END AS step,
         CASE WHEN regexp_like(TRIM(ts_raw), '.*(Z|[+-][0-9]{2}:?[0-9]{2})')
-             THEN convert_timezone('UTC', try_to_timestamp_tz(TRIM(ts_raw)))
+             -- same compact-offset normalization as Snowflake; SQLite literals don't process
+             -- backslash escapes, so the backreference is '\1' here and '\\1' in Snowflake
+             THEN convert_timezone('UTC', try_to_timestamp_tz(
+                      regexp_replace(TRIM(ts_raw), '([+-][0-9]{2})([0-9]{2})$', '\1:\2')))
              ELSE try_to_timestamp_ntz(TRIM(ts_raw)) END        AS event_ts_utc,
         NOT regexp_like(TRIM(ts_raw), '.*(Z|[+-][0-9]{2}:?[0-9]{2})') AS ts_was_assumed_utc,
         0                                                       AS ts_dst_ambiguous,
