@@ -159,7 +159,7 @@ At AMD, working with existing security-notice workflows taught me to trace input
 
 **To the PM:** "You'll have the country cut by Thursday on the current definition. Trader counts can overlap slightly for users who moved, so there's a reconciliation line. Trade counts are inflated for multi-device users until v2 lands."
 
-**Using AI:** to explain the 400 lines, map dependencies and draft tests; verified by diffing old vs. new at every grain, hand-tracing edge cases and confirming status codes with owners.
+**Using AI:** to explain the 400 lines, map dependencies and draft tests. I'd verify by diffing old vs. new at every grain, hand-tracing edge cases and confirming status codes with the owning team.
 
 ---
 

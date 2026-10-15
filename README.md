@@ -77,13 +77,16 @@ Established, on synthetic data:
   row order or duplicate rows.
 - Legacy vs. v2 behaviour for each edge case in the Exercise 3 fixture, including where the legacy country
   cut does and doesn't add up.
-- That device-level counting, counting attempted trades, or a narrower denominator can each turn 34% into
-  about 41% (Exercise 4). This shows possible mechanisms, not the real cause.
+- Exercise 4: the challenge itself states that the legacy 41% double-counts users who trade on multiple
+  devices; the fixture reproduces that device-grain mechanism (34% -> 41%). Separately, counting attempted
+  trades or narrowing the denominator can also produce a similar gap; those are hypothetical alternatives
+  for checking, not claims about real data.
 
 Not established:
 - **Snowflake execution.** The Snowflake SQL was never run. SQLite stands in, with Snowflake-only functions
   replaced by tested equivalents. Unverified Snowflake behaviour includes `CONVERT_TIMEZONE` on DST gap and
-  overlap times, automatic parsing of `+0530`-style offsets, and window `RANGE` frames.
+  overlap times, `CONVERT_TIMEZONE` with an invalid zone name, parsing of offsets after the model
+  normalizes compact `+0530`-style offsets to `+05:30` with `REGEXP_REPLACE`, and window `RANGE` frames.
 - **Real-world causes.** Business rules (e.g. KYC required before funding; country as of first completed
-  trade) are documented assumptions for the metric owner, and the Exercise 2 and 4 explanations are
-  hypotheses until checked against real data.
+  trade) are documented assumptions for the metric owner. The Exercise 2 causes, and any Exercise 4 cause
+  beyond the device double count the challenge states, are hypotheses until checked against real data.
