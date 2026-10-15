@@ -188,4 +188,4 @@ At AMD, working with existing security-notice workflows taught me to trace input
 
 ## AI Disclosure
 
-I used Claude Code to draft these responses, build the SQL and Python, generate synthetic data and write tests, and ChatGPT to review the repository, find edge cases and help draft my correction requests and personal answers. I directed the project, requested corrections and reviewed the results. All numbers come from synthetic data; explanations for real systems are hypotheses.
+I used Claude Code to draft these responses, build the SQL and Python, generate synthetic data and write tests, and ChatGPT to review the repository, find edge cases and help draft my correction requests and personal answers. I directed the project, requested corrections and reviewed the results. The challenge supplies the headline figures; my supporting numerical experiments use synthetic data.
