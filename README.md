@@ -5,6 +5,13 @@ four exercises are in `submission.md`, exported to `submission.docx` (for Google
 This repo holds the full, runnable versions of the abridged code in that document and the tests behind every
 number it quotes.
 
+## Result
+
+This submission was selected as one of the 20 winning entries in Coinbase's Insights to Impact challenge
+(October 2026), which came with a $250 USDC award and a call with a Coinbase Emerging Talent recruiter.
+The submitted version is tagged `submitted` (commit `5c2717e`); `submission.md`, `.docx` and `.pdf` are
+kept exactly as submitted.
+
 **All data here is synthetic.** The scenarios come from the challenge brief; the CSVs and SQL fixtures were
 generated or hand-built for testing. Nothing reflects real Coinbase data, systems or metrics.
 
